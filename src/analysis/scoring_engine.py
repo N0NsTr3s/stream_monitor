@@ -1,0 +1,338 @@
+"""
+Scoring Engine - Combines signals from audio, video, and chat analyzers
+"""
+import logging
+import time
+from collections import deque
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Deque, Callable, List
+
+logger = logging.getLogger(__name__)
+
+
+class RecordingState(Enum):
+    """State machine for recording"""
+    IDLE = "idle"
+    TRIGGERED = "triggered"  # Score exceeded threshold
+    RECORDING = "recording"  # Currently recording
+    COOLDOWN = "cooldown"  # Post-roll period
+
+
+@dataclass
+class ScoreEvent:
+    """A scored moment in time"""
+    timestamp: float
+    audio_score: float
+    chat_score: float
+    combined_score: float
+    state: RecordingState
+
+
+@dataclass
+class ClipTrigger:
+    """Information about a triggered clip"""
+    start_time: float
+    trigger_time: float
+    end_time: Optional[float] = None
+    peak_score: float = 0.0
+    reason: str = ""
+
+
+class ScoringEngine:
+    """
+    Combines signals from multiple analyzers to generate an importance score.
+    
+    Manages a state machine for clip recording:
+    - IDLE: Monitoring, waiting for score to exceed threshold
+    - TRIGGERED: Score exceeded threshold, recording started
+    - RECORDING: Actively recording while score is high
+    - COOLDOWN: Post-roll period after score dropped
+    """
+    
+    def __init__(
+        self,
+        audio_weight: float = 0.4,
+        chat_weight: float = 0.6,
+        trigger_threshold: float = 0.7,
+        release_threshold: float = 0.3,
+        pre_roll_seconds: float = 3.0,
+        post_roll_seconds: float = 5.0,
+        min_clip_duration: float = 5.0,
+        cooldown_seconds: float = 10.0
+    ):
+        """
+        Initialize scoring engine.
+        
+        Args:
+            audio_weight: Weight for audio signal (0.0-1.0)
+            chat_weight: Weight for chat signal (0.0-1.0)
+            trigger_threshold: Score to start recording (0.0-1.0)
+            release_threshold: Score to stop recording (0.0-1.0)
+            pre_roll_seconds: Seconds before trigger to include in clip
+            post_roll_seconds: Seconds after release to include in clip
+            min_clip_duration: Minimum clip duration
+            cooldown_seconds: Cooldown between clips
+        """
+        self.audio_weight = audio_weight
+        self.chat_weight = chat_weight
+        self.trigger_threshold = trigger_threshold
+        self.release_threshold = release_threshold
+        self.pre_roll_seconds = pre_roll_seconds
+        self.post_roll_seconds = post_roll_seconds
+        self.min_clip_duration = min_clip_duration
+        self.cooldown_seconds = cooldown_seconds
+        
+        # State
+        self._state = RecordingState.IDLE
+        self._current_trigger: Optional[ClipTrigger] = None
+        self._last_clip_end: float = 0.0
+        
+        # Score history
+        self._history: Deque[ScoreEvent] = deque(maxlen=600)  # ~60 seconds at 10Hz
+        
+        # Current scores
+        self._audio_score = 0.0
+        self._chat_score = 0.0
+        self._combined_score = 0.0
+        
+        # Callbacks
+        self._on_clip_start: List[Callable[[ClipTrigger], None]] = []
+        self._on_clip_end: List[Callable[[ClipTrigger], None]] = []
+    
+    def on_clip_start(self, callback: Callable[[ClipTrigger], None]):
+        """Register callback for when a clip recording should start"""
+        self._on_clip_start.append(callback)
+    
+    def on_clip_end(self, callback: Callable[[ClipTrigger], None]):
+        """Register callback for when a clip recording should end"""
+        self._on_clip_end.append(callback)
+    
+    def update(
+        self,
+        audio_score: Optional[float] = None,
+        chat_score: Optional[float] = None
+    ) -> float:
+        """
+        Update scores and process state machine.
+        
+        Args:
+            audio_score: Current audio score (0.0-1.0), None to keep previous
+            chat_score: Current chat score (0.0-1.0), None to keep previous
+            
+        Returns:
+            Combined score (0.0-1.0)
+        """
+        timestamp = time.time()
+        
+        # Update individual scores
+        if audio_score is not None:
+            self._audio_score = audio_score
+        if chat_score is not None:
+            self._chat_score = chat_score
+        
+        # Calculate combined score
+        self._combined_score = (
+            self._audio_score * self.audio_weight +
+            self._chat_score * self.chat_weight
+        )
+        
+        # Record to history
+        event = ScoreEvent(
+            timestamp=timestamp,
+            audio_score=self._audio_score,
+            chat_score=self._chat_score,
+            combined_score=self._combined_score,
+            state=self._state
+        )
+        self._history.append(event)
+        
+        # Process state machine
+        self._process_state(timestamp)
+        
+        return self._combined_score
+    
+    def _process_state(self, timestamp: float):
+        """Process state machine transitions"""
+        
+        if self._state == RecordingState.IDLE:
+            # Check if we should start recording
+            if self._combined_score >= self.trigger_threshold:
+                # Check cooldown
+                if timestamp - self._last_clip_end >= self.cooldown_seconds:
+                    self._start_recording(timestamp)
+        
+        elif self._state == RecordingState.TRIGGERED:
+            # Just triggered, transition to recording
+            self._state = RecordingState.RECORDING
+            logger.debug("State: TRIGGERED -> RECORDING")
+        
+        elif self._state == RecordingState.RECORDING:
+            # Update peak score
+            if self._current_trigger:
+                self._current_trigger.peak_score = max(
+                    self._current_trigger.peak_score,
+                    self._combined_score
+                )
+            
+            # Check if score dropped below release threshold
+            if self._combined_score < self.release_threshold:
+                self._state = RecordingState.COOLDOWN
+                logger.debug("State: RECORDING -> COOLDOWN")
+        
+        elif self._state == RecordingState.COOLDOWN:
+            # Check if post-roll period is complete
+            if self._current_trigger:
+                cooldown_start = self._current_trigger.trigger_time + (
+                    timestamp - self._current_trigger.trigger_time
+                )
+                
+                # Check if enough time has passed since score dropped
+                time_below_threshold = self._get_time_below_threshold()
+                
+                if time_below_threshold >= self.post_roll_seconds:
+                    self._end_recording(timestamp)
+                
+                # Re-trigger if score goes back up
+                elif self._combined_score >= self.trigger_threshold:
+                    self._state = RecordingState.RECORDING
+                    logger.debug("State: COOLDOWN -> RECORDING (re-triggered)")
+    
+    def _start_recording(self, timestamp: float):
+        """Start a new clip recording"""
+        self._state = RecordingState.TRIGGERED
+        
+        self._current_trigger = ClipTrigger(
+            start_time=timestamp - self.pre_roll_seconds,
+            trigger_time=timestamp,
+            peak_score=self._combined_score,
+            reason=self._determine_reason()
+        )
+        
+        logger.info(f"Clip triggered! Score: {self._combined_score:.2f}, Reason: {self._current_trigger.reason}")
+        
+        # Notify callbacks
+        for callback in self._on_clip_start:
+            try:
+                callback(self._current_trigger)
+            except Exception as e:
+                logger.error(f"Clip start callback error: {e}")
+    
+    def _end_recording(self, timestamp: float):
+        """End the current clip recording"""
+        if self._current_trigger:
+            self._current_trigger.end_time = timestamp
+            
+            duration = timestamp - self._current_trigger.start_time
+            logger.info(f"Clip ended. Duration: {duration:.1f}s, Peak: {self._current_trigger.peak_score:.2f}")
+            
+            # Only emit if duration is long enough
+            if duration >= self.min_clip_duration:
+                for callback in self._on_clip_end:
+                    try:
+                        callback(self._current_trigger)
+                    except Exception as e:
+                        logger.error(f"Clip end callback error: {e}")
+            else:
+                logger.debug(f"Clip too short ({duration:.1f}s), discarding")
+            
+            self._last_clip_end = timestamp
+            self._current_trigger = None
+        
+        self._state = RecordingState.IDLE
+        logger.debug("State: COOLDOWN -> IDLE")
+    
+    def _get_time_below_threshold(self) -> float:
+        """Get how long the score has been below release threshold"""
+        if not self._history:
+            return 0.0
+        
+        time_below = 0.0
+        for event in reversed(self._history):
+            if event.combined_score >= self.release_threshold:
+                break
+            time_below = time.time() - event.timestamp
+        
+        return time_below
+    
+    def _determine_reason(self) -> str:
+        """Determine what triggered the clip"""
+        reasons = []
+        
+        if self._audio_score > 0.5:
+            reasons.append("loud_audio")
+        if self._chat_score > 0.5:
+            reasons.append("chat_hype")
+        
+        return "+".join(reasons) if reasons else "unknown"
+    
+    @property
+    def state(self) -> RecordingState:
+        """Get current state"""
+        return self._state
+    
+    @property
+    def is_recording(self) -> bool:
+        """Check if currently recording"""
+        return self._state in (RecordingState.TRIGGERED, RecordingState.RECORDING, RecordingState.COOLDOWN)
+    
+    @property
+    def current_score(self) -> float:
+        """Get current combined score"""
+        return self._combined_score
+    
+    @property
+    def current_trigger(self) -> Optional[ClipTrigger]:
+        """Get current clip trigger info"""
+        return self._current_trigger
+    
+    def get_history(self, seconds: float = 10.0) -> list:
+        """Get recent score history"""
+        cutoff = time.time() - seconds
+        return [e for e in self._history if e.timestamp > cutoff]
+    
+    def reset(self):
+        """Reset engine state"""
+        self._state = RecordingState.IDLE
+        self._current_trigger = None
+        self._history.clear()
+        self._audio_score = 0.0
+        self._chat_score = 0.0
+        self._combined_score = 0.0
+
+
+if __name__ == "__main__":
+    import random
+    
+    logging.basicConfig(level=logging.INFO)
+    
+    engine = ScoringEngine(
+        trigger_threshold=0.6,
+        release_threshold=0.3,
+        post_roll_seconds=2.0
+    )
+    
+    def on_start(trigger):
+        print(f"🔴 CLIP START: {trigger.reason}")
+    
+    def on_end(trigger):
+        duration = trigger.end_time - trigger.start_time
+        print(f"⏹️ CLIP END: {duration:.1f}s, peak={trigger.peak_score:.2f}")
+    
+    engine.on_clip_start(on_start)
+    engine.on_clip_end(on_end)
+    
+    # Simulate scores over time
+    for i in range(100):
+        # Simulate a spike at i=30
+        if 30 <= i <= 50:
+            audio = 0.7 + random.random() * 0.2
+            chat = 0.8 + random.random() * 0.2
+        else:
+            audio = random.random() * 0.3
+            chat = random.random() * 0.2
+        
+        score = engine.update(audio, chat)
+        print(f"t={i}: audio={audio:.2f}, chat={chat:.2f}, combined={score:.2f}, state={engine.state.value}")
+        
+        time.sleep(0.1)
