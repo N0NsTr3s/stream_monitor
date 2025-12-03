@@ -55,7 +55,8 @@ class AudioAnalyzer:
         self._history: Deque[AudioMetrics] = deque(maxlen=max_samples)
         
         # Adaptive baseline
-        self._rms_history: Deque[float] = deque(maxlen=100)
+        # Store ~60 seconds of history for robust baseline (10 samples/sec * 60)
+        self._rms_history: Deque[float] = deque(maxlen=600)
         self._adaptive_baseline: Optional[float] = None
         
         # State
@@ -84,8 +85,9 @@ class AudioAnalyzer:
         self._rms_history.append(rms)
         
         # Calculate adaptive baseline (median of recent RMS values)
+        # Require at least 10 samples (1 sec) to start using adaptive
         if len(self._rms_history) >= 10:
-            self._adaptive_baseline = np.median(list(self._rms_history))
+            self._adaptive_baseline = float(np.median(list(self._rms_history)))
         
         # Use adaptive baseline if available, otherwise use configured
         baseline = self._adaptive_baseline or self.baseline_rms

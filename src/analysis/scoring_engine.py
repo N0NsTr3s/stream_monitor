@@ -17,6 +17,7 @@ class RecordingState(Enum):
     TRIGGERED = "triggered"  # Score exceeded threshold
     RECORDING = "recording"  # Currently recording
     COOLDOWN = "cooldown"  # Post-roll period
+    FINALIZING = "finalizing"  # Waiting to see if we should merge with next clip
 
 
 @dataclass
@@ -25,6 +26,7 @@ class ScoreEvent:
     timestamp: float
     audio_score: float
     chat_score: float
+    video_score: float
     combined_score: float
     state: RecordingState
 
@@ -52,14 +54,16 @@ class ScoringEngine:
     
     def __init__(
         self,
-        audio_weight: float = 0.4,
-        chat_weight: float = 0.6,
+        audio_weight: float = 0.5,
+        chat_weight: float = 0.5,
+        video_weight: float = 0.5,
         trigger_threshold: float = 0.7,
         release_threshold: float = 0.3,
         pre_roll_seconds: float = 3.0,
         post_roll_seconds: float = 5.0,
         min_clip_duration: float = 5.0,
-        cooldown_seconds: float = 10.0
+        cooldown_seconds: float = 10.0,
+        calibration_seconds: float = 20.0
     ):
         """
         Initialize scoring engine.
@@ -67,26 +71,32 @@ class ScoringEngine:
         Args:
             audio_weight: Weight for audio signal (0.0-1.0)
             chat_weight: Weight for chat signal (0.0-1.0)
+            video_weight: Weight for video signal (0.0-1.0)
             trigger_threshold: Score to start recording (0.0-1.0)
             release_threshold: Score to stop recording (0.0-1.0)
             pre_roll_seconds: Seconds before trigger to include in clip
             post_roll_seconds: Seconds after release to include in clip
             min_clip_duration: Minimum clip duration
             cooldown_seconds: Cooldown between clips
+            calibration_seconds: Initial calibration period in seconds
         """
         self.audio_weight = audio_weight
         self.chat_weight = chat_weight
+        self.video_weight = video_weight
         self.trigger_threshold = trigger_threshold
         self.release_threshold = release_threshold
         self.pre_roll_seconds = pre_roll_seconds
         self.post_roll_seconds = post_roll_seconds
         self.min_clip_duration = min_clip_duration
         self.cooldown_seconds = cooldown_seconds
+        self.calibration_seconds = calibration_seconds
         
         # State
         self._state = RecordingState.IDLE
         self._current_trigger: Optional[ClipTrigger] = None
         self._last_clip_end: float = 0.0
+        self._finalizing_start_time: float = 0.0
+        self._start_time = time.time()
         
         # Score history
         self._history: Deque[ScoreEvent] = deque(maxlen=600)  # ~60 seconds at 10Hz
@@ -94,12 +104,18 @@ class ScoringEngine:
         # Current scores
         self._audio_score = 0.0
         self._chat_score = 0.0
+        self._video_score = 0.0
         self._combined_score = 0.0
         
         # Callbacks
         self._on_clip_start: List[Callable[[ClipTrigger], None]] = []
         self._on_clip_end: List[Callable[[ClipTrigger], None]] = []
     
+    @property
+    def is_calibrating(self) -> bool:
+        """Check if currently in calibration phase"""
+        return (time.time() - self._start_time) < self.calibration_seconds
+
     def on_clip_start(self, callback: Callable[[ClipTrigger], None]):
         """Register callback for when a clip recording should start"""
         self._on_clip_start.append(callback)
@@ -111,7 +127,8 @@ class ScoringEngine:
     def update(
         self,
         audio_score: Optional[float] = None,
-        chat_score: Optional[float] = None
+        chat_score: Optional[float] = None,
+        video_score: Optional[float] = None
     ) -> float:
         """
         Update scores and process state machine.
@@ -119,6 +136,7 @@ class ScoringEngine:
         Args:
             audio_score: Current audio score (0.0-1.0), None to keep previous
             chat_score: Current chat score (0.0-1.0), None to keep previous
+            video_score: Current video score (0.0-1.0), None to keep previous
             
         Returns:
             Combined score (0.0-1.0)
@@ -130,18 +148,33 @@ class ScoringEngine:
             self._audio_score = audio_score
         if chat_score is not None:
             self._chat_score = chat_score
+        if video_score is not None:
+            self._video_score = video_score
         
         # Calculate combined score
-        self._combined_score = (
+        # Use a weighted average, but also allow a single very strong signal to boost the score
+        weighted_score = (
             self._audio_score * self.audio_weight +
-            self._chat_score * self.chat_weight
+            self._chat_score * self.chat_weight +
+            self._video_score * self.video_weight
         )
+        
+        # If any single metric is very high (e.g. > 0.8), it can "carry" the score
+        # This ensures a scream (high audio) triggers a clip even if chat is silent
+        max_single_score = max(self._audio_score, self._chat_score, self._video_score)
+        
+        if max_single_score > 0.8:
+            # Boost the score towards the max single score
+            self._combined_score = max(weighted_score, max_single_score * 0.9)
+        else:
+            self._combined_score = weighted_score
         
         # Record to history
         event = ScoreEvent(
             timestamp=timestamp,
             audio_score=self._audio_score,
             chat_score=self._chat_score,
+            video_score=self._video_score,
             combined_score=self._combined_score,
             state=self._state
         )
@@ -155,6 +188,10 @@ class ScoringEngine:
     def _process_state(self, timestamp: float):
         """Process state machine transitions"""
         
+        if self.is_calibrating:
+            # Do not trigger during calibration
+            return
+
         if self._state == RecordingState.IDLE:
             # Check if we should start recording
             if self._combined_score >= self.trigger_threshold:
@@ -177,8 +214,15 @@ class ScoringEngine:
             
             # Check if score dropped below release threshold
             if self._combined_score < self.release_threshold:
-                self._state = RecordingState.COOLDOWN
-                logger.debug("State: RECORDING -> COOLDOWN")
+                # Only release if we've met the minimum duration requirement
+                # Projected duration = current duration + post_roll
+                current_duration = timestamp - self._current_trigger.start_time
+                projected_duration = current_duration + self.post_roll_seconds
+                
+                if projected_duration >= self.min_clip_duration:
+                    self._state = RecordingState.COOLDOWN
+                    logger.debug("State: RECORDING -> COOLDOWN")
+                # Else: continue recording until min duration is met
         
         elif self._state == RecordingState.COOLDOWN:
             # Check if post-roll period is complete
@@ -191,12 +235,28 @@ class ScoringEngine:
                 time_below_threshold = self._get_time_below_threshold()
                 
                 if time_below_threshold >= self.post_roll_seconds:
-                    self._end_recording(timestamp)
+                    # Instead of ending immediately, enter FINALIZING state
+                    # This allows us to merge with a subsequent clip if it starts soon
+                    self._state = RecordingState.FINALIZING
+                    self._finalizing_start_time = timestamp
+                    logger.debug("State: COOLDOWN -> FINALIZING")
                 
                 # Re-trigger if score goes back up
                 elif self._combined_score >= self.trigger_threshold:
                     self._state = RecordingState.RECORDING
                     logger.debug("State: COOLDOWN -> RECORDING (re-triggered)")
+                    
+        elif self._state == RecordingState.FINALIZING:
+            # If score spikes again during the merge window (pre-roll duration),
+            # go back to recording and extend the current clip
+            if self._combined_score >= self.trigger_threshold:
+                self._state = RecordingState.RECORDING
+                logger.info("Merging with subsequent clip event!")
+                logger.debug("State: FINALIZING -> RECORDING (merged)")
+            
+            # If merge window passed, finalize the clip
+            elif timestamp - self._finalizing_start_time >= self.pre_roll_seconds:
+                self._end_recording(timestamp)
     
     def _start_recording(self, timestamp: float):
         """Start a new clip recording"""
@@ -263,6 +323,8 @@ class ScoringEngine:
             reasons.append("loud_audio")
         if self._chat_score > 0.5:
             reasons.append("chat_hype")
+        if self._video_score > 0.5:
+            reasons.append("high_motion")
         
         return "+".join(reasons) if reasons else "unknown"
     
@@ -274,7 +336,12 @@ class ScoringEngine:
     @property
     def is_recording(self) -> bool:
         """Check if currently recording"""
-        return self._state in (RecordingState.TRIGGERED, RecordingState.RECORDING, RecordingState.COOLDOWN)
+        return self._state in (
+            RecordingState.TRIGGERED,
+            RecordingState.RECORDING,
+            RecordingState.COOLDOWN,
+            RecordingState.FINALIZING
+        )
     
     @property
     def current_score(self) -> float:
@@ -298,6 +365,7 @@ class ScoringEngine:
         self._history.clear()
         self._audio_score = 0.0
         self._chat_score = 0.0
+        self._video_score = 0.0
         self._combined_score = 0.0
 
 
@@ -328,11 +396,13 @@ if __name__ == "__main__":
         if 30 <= i <= 50:
             audio = 0.7 + random.random() * 0.2
             chat = 0.8 + random.random() * 0.2
+            video = 0.6 + random.random() * 0.2
         else:
             audio = random.random() * 0.3
             chat = random.random() * 0.2
+            video = random.random() * 0.2
         
-        score = engine.update(audio, chat)
-        print(f"t={i}: audio={audio:.2f}, chat={chat:.2f}, combined={score:.2f}, state={engine.state.value}")
+        score = engine.update(audio, chat, video)
+        print(f"t={i}: audio={audio:.2f}, chat={chat:.2f}, video={video:.2f}, combined={score:.2f}, state={engine.state.value}")
         
         time.sleep(0.1)

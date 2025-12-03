@@ -15,16 +15,18 @@ load_dotenv()
 class StreamConfig:
     """Configuration for stream capture"""
     quality: str = "best"  # streamlink quality option
-    buffer_seconds: int = 30  # seconds to keep in circular buffer
+    buffer_seconds: int = 30  # Restored to 30s since we use disk buffer now
     
 
 @dataclass
 class ClipConfig:
     """Configuration for clip generation"""
-    pre_roll_seconds: float = 3.0  # seconds before trigger to include
-    post_roll_seconds: float = 5.0  # seconds after score drops to include
+    pre_roll_seconds: float = 5.0  # seconds before trigger to include
+    post_roll_seconds: float = 3.0  # seconds after score drops to include
+    min_duration: float = 8.0  # Minimum clip duration in seconds
     output_dir: Path = field(default_factory=lambda: Path("clips"))
     format: str = "mp4"
+    fps: float = 60.0  # Target FPS for clips
     
 
 @dataclass
@@ -32,20 +34,28 @@ class ScoringConfig:
     """Configuration for the scoring engine"""
     # Weights for different signals (should sum to 1.0)
     audio_weight: float = 0.4
-    chat_weight: float = 0.6
+    chat_weight: float = 0.4
+    video_weight: float = 0.2
     
     # Thresholds
     trigger_threshold: float = 0.7  # Score to start recording
     release_threshold: float = 0.3  # Score to stop recording
     
     # Audio settings
-    audio_rms_baseline: float = 0.1  # Baseline RMS for normalization
-    audio_spike_multiplier: float = 3.0  # How much above baseline = max score
+    audio_rms_baseline: float = 0.05  # Lower baseline to be more sensitive
+    audio_spike_multiplier: float = 2.5  # Lower multiplier to reach max score easier
     
     # Chat settings
     chat_window_seconds: float = 5.0  # Window for measuring chat velocity
     chat_baseline_mps: float = 1.0  # Baseline messages per second
     chat_spike_multiplier: float = 5.0  # How much above baseline = max score
+    chat_latency_seconds: float = 5.0  # Delay chat score to match video latency
+
+    # Video settings
+
+    # Video settings
+    video_motion_baseline: float = 12.0  # Higher baseline to ignore camera pans (was 5.0)
+    video_spike_multiplier: float = 5.0  # Higher multiplier to require more chaos (was 4.0)
 
 
 @dataclass

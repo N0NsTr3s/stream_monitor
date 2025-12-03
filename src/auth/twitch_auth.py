@@ -31,6 +31,7 @@ TWITCH_REVOKE_URL = "https://id.twitch.tv/oauth2/revoke"
 DEFAULT_SCOPES = [
     "chat:read",
     "user:read:email",
+    "user:read:chat",
 ]
 
 
@@ -41,7 +42,7 @@ class TwitchTokens:
     refresh_token: str
     expires_at: float  # Unix timestamp
     token_type: str = "bearer"
-    scopes: list = None
+    scopes: list = None # type: ignore
     
     def __post_init__(self):
         if self.scopes is None:

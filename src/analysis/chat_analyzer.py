@@ -5,7 +5,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional, Deque, Set
+from typing import List, Optional, Deque, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +76,16 @@ class ChatAnalyzer:
         self._history: Deque[ChatMetrics] = deque(maxlen=max_metrics)
         
         # Adaptive baseline
-        self._mps_history: Deque[float] = deque(maxlen=60)
+        # Store ~60 seconds of history (assuming ~2 updates/sec)
+        self._mps_history: Deque[float] = deque(maxlen=120)
         self._adaptive_baseline: Optional[float] = None
         
         # State
         self._last_score = 0.0
         self._last_analysis_time = 0.0
+        
+        # Latency buffer for score delay
+        self._score_buffer: Deque[Tuple[float, float]] = deque()  # (timestamp, score)
     
     def add_message(
         self,
@@ -206,6 +210,41 @@ class ChatAnalyzer:
         
         return metrics
     
+    def get_delayed_score(self, latency_seconds: float = 0.0) -> float:
+        """
+        Get the score from 'latency_seconds' ago.
+        Useful for aligning chat (fast) with video (slow).
+        """
+        if latency_seconds <= 0:
+            return self._last_score
+            
+        current_time = time.time()
+        target_time = current_time - latency_seconds
+        
+        # Add current score to buffer
+        self._score_buffer.append((current_time, self._last_score))
+        
+        # Remove old scores (keep 2x latency just in case)
+        while self._score_buffer and self._score_buffer[0][0] < current_time - (latency_seconds * 2):
+            self._score_buffer.popleft()
+            
+        # Find score closest to target time
+        # Since buffer is sorted by time, we can iterate or bisect
+        # For small buffers, iteration is fine
+        closest_score = 0.0
+        min_diff = float('inf')
+        
+        for ts, score in self._score_buffer:
+            diff = abs(ts - target_time)
+            if diff < min_diff:
+                min_diff = diff
+                closest_score = score
+            else:
+                # If diff starts increasing, we passed the target
+                break
+                
+        return closest_score
+
     def get_current_score(self) -> float:
         """Get the current normalized chat score (0.0 - 1.0)"""
         # Re-analyze if stale
@@ -262,7 +301,7 @@ class ChatAnalyzer:
 
 # Import numpy for median calculation
 try:
-    import numpy as np
+    import numpy as np # type: ignore
 except ImportError:
     # Fallback without numpy
     class np:

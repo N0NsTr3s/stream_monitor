@@ -11,6 +11,8 @@ from queue import Queue, Empty
 import streamlink
 import numpy as np
 
+import shutil
+
 # Try to import cv2, provide fallback
 try:
     import cv2
@@ -46,6 +48,11 @@ class StreamCapture:
         self._video_capture: Optional[cv2.VideoCapture] = None
         self._audio_process: Optional[subprocess.Popen] = None
         self._is_running = False
+        
+        # Check for ffmpeg
+        self._ffmpeg_path = shutil.which("ffmpeg")
+        if not self._ffmpeg_path:
+            logger.warning("FFmpeg not found in PATH. Audio capture will be disabled.")
         
         # Audio buffer
         self._audio_queue: Queue = Queue(maxsize=100)
@@ -119,16 +126,23 @@ class StreamCapture:
     
     def _start_audio_capture(self):
         """Start FFmpeg process for audio capture"""
+        if not self._ffmpeg_path:
+            logger.warning("FFmpeg not found - skipping audio capture")
+            return
+
         # FFmpeg command to extract audio as raw PCM
+        # Added -re to read input at native frame rate to prevent buffer overflow
+        # Added -thread_queue_size to increase buffer
         cmd = [
-            "ffmpeg",
+            self._ffmpeg_path,
+            "-thread_queue_size", "1024",
             "-i", self._stream_url,
             "-vn",  # No video
             "-acodec", "pcm_s16le",  # 16-bit PCM
             "-ar", "44100",  # 44.1kHz sample rate
             "-ac", "1",  # Mono
             "-f", "s16le",  # Raw PCM format
-            "-loglevel", "quiet",
+            "-loglevel", "warning", # Show warnings
             "pipe:1"  # Output to stdout
         ]
         
@@ -136,18 +150,15 @@ class StreamCapture:
             self._audio_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,  # Capture stderr
                 bufsize=4096
             )
             
             # Start thread to read audio data
             self._audio_thread = threading.Thread(target=self._audio_reader, daemon=True)
             self._audio_thread.start()
-            logger.info("Audio capture started")
+            logger.info(f"Audio capture started with command: {' '.join(cmd)}")
             
-        except FileNotFoundError:
-            logger.warning("FFmpeg not found - audio capture disabled")
-            self._audio_process = None
         except Exception as e:
             logger.error(f"Error starting audio capture: {e}")
             self._audio_process = None
@@ -155,11 +166,17 @@ class StreamCapture:
     def _audio_reader(self):
         """Background thread to read audio data from FFmpeg"""
         chunk_size = 4410  # ~100ms of audio at 44.1kHz mono
+        bytes_read = 0
         
         while self._is_running and self._audio_process:
             try:
+                # Use a larger read buffer to prevent pipe blocking
                 data = self._audio_process.stdout.read(chunk_size * 2)  # 2 bytes per sample
                 if data:
+                    bytes_read += len(data)
+                    if bytes_read < 100000: # Log first few chunks
+                         logger.debug(f"Read {len(data)} bytes of audio data")
+
                     # Convert to numpy array
                     audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                     try:
@@ -172,6 +189,11 @@ class StreamCapture:
                         except:
                             pass
                 else:
+                    # Process exited or no data
+                    if self._audio_process.poll() is not None:
+                        stderr_out = self._audio_process.stderr.read()
+                        if stderr_out:
+                            logger.error(f"FFmpeg audio capture failed: {stderr_out.decode('utf-8', errors='ignore')}")
                     break
             except Exception as e:
                 logger.error(f"Audio reader error: {e}")

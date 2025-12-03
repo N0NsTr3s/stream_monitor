@@ -17,6 +17,7 @@ from .monitors.chat_youtube import YouTubeChatMonitor
 from .monitors.chat_kick import KickChatMonitor
 from .analysis.audio_analyzer import AudioAnalyzer
 from .analysis.chat_analyzer import ChatAnalyzer
+from .analysis.video_analyzer import VideoAnalyzer
 from .analysis.scoring_engine import ScoringEngine, ClipTrigger
 from .utils.platform_detector import PlatformDetector, Platform
 from .utils.circular_buffer import CircularBuffer
@@ -66,6 +67,7 @@ class StreamMonitor:
         self._chat_monitor = None
         self._audio_analyzer: Optional[AudioAnalyzer] = None
         self._chat_analyzer: Optional[ChatAnalyzer] = None
+        self._video_analyzer: Optional[VideoAnalyzer] = None
         self._scoring_engine: Optional[ScoringEngine] = None
         self._buffer: Optional[CircularBuffer] = None
         self._clipper: Optional[Clipper] = None
@@ -117,14 +119,21 @@ class StreamMonitor:
             spike_multiplier=self.config.scoring.chat_spike_multiplier
         )
         
+        self._video_analyzer = VideoAnalyzer(
+            baseline_motion=self.config.scoring.video_motion_baseline,
+            spike_multiplier=self.config.scoring.video_spike_multiplier
+        )
+        
         # Scoring engine
         self._scoring_engine = ScoringEngine(
             audio_weight=self.config.scoring.audio_weight,
             chat_weight=self.config.scoring.chat_weight,
+            video_weight=self.config.scoring.video_weight,
             trigger_threshold=self.config.scoring.trigger_threshold,
             release_threshold=self.config.scoring.release_threshold,
             pre_roll_seconds=self.config.clip.pre_roll_seconds,
-            post_roll_seconds=self.config.clip.post_roll_seconds
+            post_roll_seconds=self.config.clip.post_roll_seconds,
+            min_clip_duration=self.config.clip.min_duration
         )
         
         # Register clip callbacks
@@ -175,12 +184,37 @@ class StreamMonitor:
         """Main video processing loop"""
         logger.info("Video processing loop started")
         
-        frame_interval = 1.0 / 30.0  # Target 30fps processing
+        # Use actual stream FPS if available, otherwise default to 30
+        detected_fps = self._stream.get_frame_rate() if self._stream else 0
+        target_fps = self.config.clip.fps
+        
+        if detected_fps > 0:
+            # If detected FPS is significantly lower than target (e.g. 30 vs 60),
+            # and user requested 60, we might want to trust the user if detection is flaky.
+            # However, if we force 60 on a 30 stream, we just duplicate frames or sleep less.
+            # For HLS, 30 is often reported even for 60fps streams.
+            if detected_fps < target_fps - 5:
+                logger.warning(f"Detected FPS ({detected_fps}) is lower than target ({target_fps}). Forcing target FPS.")
+                # We use the configured FPS as the truth
+            else:
+                target_fps = detected_fps
+        
+        # Update buffer/clipper with the FPS we are actually going to use
+        if self._buffer:
+            self._buffer.fps = target_fps
+        if self._clipper:
+            self._clipper.fps = target_fps
+            
+        frame_interval = 1.0 / target_fps
+        logger.info(f"Target processing FPS: {target_fps} (interval: {frame_interval:.4f}s)")
+        
         last_frame_time = time.time()
         
         while self._is_running and not self._shutdown_event.is_set():
             try:
-                # Read frame
+                start_time = time.time()
+                
+                # Read frame - this usually blocks until frame is available
                 ret, frame = self._stream.read_frame()
                 
                 if not ret or frame is None:
@@ -193,12 +227,21 @@ class StreamMonitor:
                 # Add to buffer
                 self._buffer.add_video_frame(frame, current_time)
                 
+                # Analyze video
+                metrics = self._video_analyzer.analyze(frame)
+                
+                # Update scoring engine
+                self._scoring_engine.update(video_score=metrics.normalized_score)
+                
                 self._frames_processed += 1
                 
                 # Rate limit processing
-                elapsed = current_time - last_frame_time
-                if elapsed < frame_interval:
-                    time.sleep(frame_interval - elapsed)
+                # Only sleep if we are processing faster than the stream provides frames
+                # (which is unlikely if read_frame blocks)
+                proc_time = time.time() - start_time
+                wait = frame_interval - proc_time
+                if wait > 0.001: # Only sleep if significant time remains
+                    time.sleep(wait)
                 
                 last_frame_time = time.time()
                 
@@ -255,8 +298,13 @@ class StreamMonitor:
                 # Analyze chat
                 metrics = self._chat_analyzer.analyze()
                 
+                # Get delayed score to align with video latency
+                chat_score = self._chat_analyzer.get_delayed_score(
+                    latency_seconds=self.config.scoring.chat_latency_seconds
+                )
+                
                 # Update scoring engine
-                self._scoring_engine.update(chat_score=metrics.normalized_score)
+                self._scoring_engine.update(chat_score=chat_score)
                 
                 time.sleep(0.5)  # Chat analysis rate
                 
@@ -273,10 +321,15 @@ class StreamMonitor:
                 elapsed = time.time() - self._start_time
                 fps = self._frames_processed / max(elapsed, 1)
                 
+                state_str = self._scoring_engine.state.value
+                if self._scoring_engine.is_calibrating:
+                    remaining = max(0, self._scoring_engine.calibration_seconds - elapsed)
+                    state_str = f"CALIBRATING ({remaining:.0f}s)"
+                
                 status = (
                     f"\r[{self.platform.value.upper()}] "
                     f"Score: {self._scoring_engine.current_score:.2f} | "
-                    f"State: {self._scoring_engine.state.value:10} | "
+                    f"State: {state_str:20} | "
                     f"Buffer: {self._buffer.get_duration():.1f}s | "
                     f"Clips: {self._clips_created} | "
                     f"FPS: {fps:.1f} | "
@@ -314,8 +367,19 @@ class StreamMonitor:
         
         # Update FPS from stream
         actual_fps = self._stream.get_frame_rate()
-        self._buffer.fps = actual_fps
-        self._clipper.fps = actual_fps
+        if actual_fps <= 0:
+            actual_fps = self.config.clip.fps
+            logger.warning(f"Could not detect stream FPS, defaulting to {actual_fps}")
+            
+        # Re-initialize buffer and clipper with correct FPS
+        self._buffer = CircularBuffer(
+            max_seconds=self.config.stream.buffer_seconds,
+            fps=actual_fps
+        )
+        self._clipper = Clipper(
+            output_dir=self.config.clip.output_dir,
+            fps=actual_fps
+        )
         self._clipper.resolution = self._stream.get_resolution()
         
         logger.info(f"Stream: {self._stream.get_resolution()}, {actual_fps} FPS")
@@ -360,6 +424,9 @@ class StreamMonitor:
         
         if self._chat_monitor:
             self._chat_monitor.stop()
+            
+        if self._buffer:
+            self._buffer.close()
         
         # Wait for threads
         for thread in self._threads:
@@ -433,14 +500,14 @@ def main():
     parser.add_argument(
         "--pre-roll",
         type=float,
-        default=3.0,
+        default=5.0,
         help="Seconds before trigger to include"
     )
     
     parser.add_argument(
         "--post-roll",
         type=float,
-        default=5.0,
+        default=3.0,
         help="Seconds after release to include"
     )
     
@@ -454,8 +521,29 @@ def main():
     parser.add_argument(
         "--chat-weight",
         type=float,
-        default=0.6,
+        default=0.4,
         help="Weight for chat signal (0.0-1.0)"
+    )
+    
+    parser.add_argument(
+        "--video-weight",
+        type=float,
+        default=0.2,
+        help="Weight for video signal (0.0-1.0)"
+    )
+    
+    parser.add_argument(
+        "--video-baseline",
+        type=float,
+        default=12.0,
+        help="Baseline motion threshold"
+    )
+    
+    parser.add_argument(
+        "--video-multiplier",
+        type=float,
+        default=6.0,
+        help="Video spike multiplier"
     )
     
     parser.add_argument(
@@ -483,6 +571,9 @@ def main():
     config.clip.post_roll_seconds = args.post_roll
     config.scoring.audio_weight = args.audio_weight
     config.scoring.chat_weight = args.chat_weight
+    config.scoring.video_weight = args.video_weight
+    config.scoring.video_motion_baseline = args.video_baseline
+    config.scoring.video_spike_multiplier = args.video_multiplier
     
     # Validate URL
     if not PlatformDetector.is_supported(args.url):

@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Iterable
 
 import numpy as np
 
@@ -117,15 +117,11 @@ class Clipper:
             logger.error("OpenCV (cv2) not available - cannot save clips")
             return None
         
-        # Get frames from buffer
-        video_frames = buffer.get_video_frames(start_time, end_time)
+        # Get frames from buffer (generator)
+        video_frames = buffer.yield_video_frames(start_time, end_time)
         audio_chunks = buffer.get_audio_chunks(start_time, end_time)
         
-        if not video_frames:
-            logger.warning("No video frames in buffer for clip")
-            return None
-        
-        logger.info(f"Saving clip: {len(video_frames)} frames, {len(audio_chunks)} audio chunks")
+        logger.info(f"Saving clip: {end_time - start_time:.1f}s duration")
         
         # Generate output path
         if reason:
@@ -144,61 +140,129 @@ class Clipper:
             if final_path:
                 return final_path
         
-        return video_path
+        # Fallback if no audio or muxing failed
+        if video_path.exists():
+            final_path = output_path.with_suffix('.avi')
+            if final_path.exists():
+                os.unlink(final_path)
+            os.rename(video_path, final_path)
+            return final_path
+        
+        return None
     
     def _save_video_frames(
         self,
-        frames: List[Tuple[float, np.ndarray]],
-        output_path: Path
+        frames: Iterable[Tuple[float, np.ndarray]],
+        output_path: Path,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None
     ) -> Optional[Path]:
         """Save video frames using OpenCV"""
         
-        if not frames:
-            return None
-        
-        # Get resolution from first frame
-        _, first_frame = frames[0]
-        height, width = first_frame.shape[:2]
-        
-        # Create video writer
-        fourcc = cv2.VideoWriter_fourcc(*self.video_codec)
+        writer = None
         temp_path = output_path.with_suffix('.temp.avi')
-        
-        writer = cv2.VideoWriter(
-            str(temp_path),
-            fourcc,
-            self.fps,
-            (width, height)
-        )
-        
-        if not writer.isOpened():
-            logger.error("Failed to create video writer")
-            return None
+        frames_written = 0
         
         try:
-            # Sort frames by timestamp
-            sorted_frames = sorted(frames, key=lambda x: x[0])
-            
-            # Write frames
-            for timestamp, frame in sorted_frames:
-                # Ensure frame is correct format
-                if frame.dtype != np.uint8:
-                    frame = frame.astype(np.uint8)
+            # If start/end times are provided, we can enforce constant frame rate
+            # by duplicating frames if needed.
+            if start_time is not None and end_time is not None:
+                # Use iterator to pull frames as needed
+                frame_iter = iter(frames)
                 
-                # Resize if needed
-                if frame.shape[:2] != (height, width):
-                    frame = cv2.resize(frame, (width, height))
+                try:
+                    next_ts, next_frame = next(frame_iter)
+                    current_frame = next_frame
+                except StopIteration:
+                    logger.warning("No frames in generator")
+                    return None
                 
-                writer.write(frame)
+                # Initialize writer
+                height, width = current_frame.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*self.video_codec)
+                writer = cv2.VideoWriter(
+                    str(temp_path),
+                    fourcc,
+                    self.fps,
+                    (width, height)
+                )
+                
+                if not writer.isOpened():
+                    logger.error("Failed to create video writer")
+                    return None
+                
+                # Iterate through time steps
+                frame_duration = 1.0 / self.fps
+                current_time = start_time
+                
+                while current_time < end_time:
+                    # Advance to the correct frame for this timestamp
+                    while next_ts is not None and next_ts <= current_time:
+                        current_frame = next_frame
+                        try:
+                            next_ts, next_frame = next(frame_iter)
+                        except StopIteration:
+                            next_ts = None # No more frames
+                            break
+                    
+                    # Write current frame
+                    # Ensure frame is correct format
+                    if current_frame.dtype != np.uint8:
+                        current_frame = current_frame.astype(np.uint8)
+                    
+                    # Resize if needed
+                    if current_frame.shape[:2] != (height, width):
+                        current_frame = cv2.resize(current_frame, (width, height))
+                    
+                    writer.write(current_frame)
+                    frames_written += 1
+                    current_time += frame_duration
+                    
+            else:
+                # Legacy mode: just write frames as they come
+                for timestamp, frame in frames:
+                    # Initialize writer on first frame
+                    if writer is None:
+                        height, width = frame.shape[:2]
+                        fourcc = cv2.VideoWriter_fourcc(*self.video_codec)
+                        writer = cv2.VideoWriter(
+                            str(temp_path),
+                            fourcc,
+                            self.fps,
+                            (width, height)
+                        )
+                        if not writer.isOpened():
+                            logger.error("Failed to create video writer")
+                            return None
+
+                    # Ensure frame is correct format
+                    if frame.dtype != np.uint8:
+                        frame = frame.astype(np.uint8)
+                    
+                    # Resize if needed
+                    if frame.shape[:2] != (writer.get(cv2.CAP_PROP_FRAME_HEIGHT), writer.get(cv2.CAP_PROP_FRAME_WIDTH)):
+                         # Get current writer dimensions
+                        h = int(writer.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        w = int(writer.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        frame = cv2.resize(frame, (w, h))
+                    
+                    writer.write(frame)
+                    frames_written += 1
             
-            writer.release()
-            logger.info(f"Saved video to {temp_path}")
-            
+            if writer:
+                writer.release()
+                
+            if frames_written == 0:
+                logger.warning("No frames written to video")
+                return None
+                
+            logger.info(f"Saved video to {temp_path} ({frames_written} frames)")
             return temp_path
             
         except Exception as e:
             logger.error(f"Error writing video: {e}")
-            writer.release()
+            if writer:
+                writer.release()
             return None
     
     def _mux_audio(
@@ -213,24 +277,29 @@ class Clipper:
         sorted_audio = sorted(audio_chunks, key=lambda x: x[0])
         audio_data = np.concatenate([chunk for _, chunk in sorted_audio])
         
+        # Convert to int16 for better compatibility
+        # Clip values to -1.0 to 1.0 before scaling to avoid overflow
+        audio_data = np.clip(audio_data, -1.0, 1.0)
+        audio_int16 = (audio_data * 32767).astype(np.int16)
+        
         # Save audio to temp file
         with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as f:
             audio_temp = f.name
-            audio_data.astype(np.float32).tofile(f)
+            audio_int16.tofile(f)
         
         try:
             # Use FFmpeg to mux audio and video
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(video_path),
-                "-f", "f32le",
+                "-f", "s16le",
                 "-ar", str(self.audio_sample_rate),
                 "-ac", "1",
                 "-i", audio_temp,
                 "-c:v", "libx264",
                 "-preset", "fast",
                 "-c:a", "aac",
-                "-shortest",
+                "-b:a", "128k",
                 str(output_path)
             ]
             
@@ -242,24 +311,57 @@ class Clipper:
             )
             
             if result.returncode == 0:
-                # Clean up temp files
-                os.unlink(audio_temp)
-                os.unlink(video_path)
+                # Clean up temp video file
+                try:
+                    if video_path.exists():
+                        os.unlink(video_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp video: {e}")
+                
                 logger.info(f"Saved clip with audio to {output_path}")
                 return output_path
             else:
                 logger.warning(f"FFmpeg muxing failed: {result.stderr}")
-                # Fall back to video-only
-                os.rename(video_path, output_path.with_suffix('.avi'))
-                return output_path.with_suffix('.avi')
+                # Fall back to video-only (rename temp file)
+                fallback_path = output_path.with_suffix('.avi')
                 
-        except FileNotFoundError:
-            logger.warning("FFmpeg not found - saving video without audio")
-            os.rename(video_path, output_path.with_suffix('.avi'))
-            return output_path.with_suffix('.avi')
+                # Delete the failed mp4 if it exists
+                if output_path.exists():
+                    try:
+                        os.unlink(output_path)
+                    except:
+                        pass
+                        
+                if video_path.exists():
+                    if fallback_path.exists():
+                        try:
+                            os.unlink(fallback_path)
+                        except:
+                            pass
+                    os.rename(video_path, fallback_path)
+                return fallback_path
+                
         except Exception as e:
             logger.error(f"Error muxing audio: {e}")
-            return video_path
+            # Fall back to video-only
+            fallback_path = output_path.with_suffix('.avi')
+            
+            # Delete the failed mp4 if it exists
+            if output_path.exists():
+                try:
+                    os.unlink(output_path)
+                except:
+                    pass
+            
+            if video_path.exists():
+                if fallback_path.exists():
+                    try:
+                        os.unlink(fallback_path)
+                    except:
+                        pass
+                os.rename(video_path, fallback_path)
+            return fallback_path
+            
         finally:
             # Clean up temp audio file
             try:
@@ -288,12 +390,12 @@ class Clipper:
             callback: Optional callback(path) when complete
         """
         def save_task():
-            # Create a snapshot of the buffer data
-            video_frames = buffer.get_video_frames(start_time, end_time)
+            # Use generator to stream frames from disk buffer
+            video_frames = buffer.yield_video_frames(start_time, end_time)
             audio_chunks = buffer.get_audio_chunks(start_time, end_time)
             
             # Save directly without going through buffer again
-            path = self._save_direct(video_frames, audio_chunks, prefix, reason)
+            path = self._save_direct(video_frames, audio_chunks, prefix, reason, start_time, end_time)
             
             if callback:
                 callback(path)
@@ -304,27 +406,38 @@ class Clipper:
     
     def _save_direct(
         self,
-        video_frames: List[Tuple[float, np.ndarray]],
+        video_frames: Iterable[Tuple[float, np.ndarray]],
         audio_chunks: List[Tuple[float, np.ndarray]],
         prefix: str,
-        reason: str
+        reason: str,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None
     ) -> Optional[Path]:
         """Save frames directly without buffer lookup"""
         
-        if not video_frames:
-            return None
+        # Note: We can't check if video_frames is empty here easily
         
         with self._save_lock:
             if reason:
                 prefix = f"{prefix}_{reason.replace('+', '_')}"
             output_path = self._generate_filename(prefix)
             
-            video_path = self._save_video_frames(video_frames, output_path)
+            video_path = self._save_video_frames(video_frames, output_path, start_time, end_time)
             
             if video_path and audio_chunks:
-                return self._mux_audio(video_path, audio_chunks, output_path)
+                final_path = self._mux_audio(video_path, audio_chunks, output_path)
+                if final_path:
+                    return final_path
             
-            return video_path
+            # Fallback if no audio or muxing failed
+            if video_path and video_path.exists():
+                final_path = output_path.with_suffix('.avi')
+                if final_path.exists():
+                    os.unlink(final_path)
+                os.rename(video_path, final_path)
+                return final_path
+            
+            return None
 
 
 if __name__ == "__main__":
