@@ -5,12 +5,12 @@ Resolves stream URLs and provides access to video/audio data
 import logging
 import subprocess
 import threading
-from typing import Optional, Generator, Tuple
+import time
+from typing import Optional, Generator, Tuple, Deque
 from queue import Queue, Empty
 
 import streamlink
 import numpy as np
-
 import shutil
 
 # Try to import cv2, provide fallback
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class StreamCapture:
     """
     Captures video/audio stream using streamlink.
-    Provides frames via OpenCV and raw audio via FFmpeg.
+    Provides raw stream chunks for buffering and decoded frames for analysis.
     """
     
     def __init__(self, url: str, quality: str = "best"):
@@ -45,18 +45,33 @@ class StreamCapture:
         self.platform, self.channel_id = PlatformDetector.detect(self.url)
         
         self._stream_url: Optional[str] = None
-        self._video_capture: Optional[cv2.VideoCapture] = None
+        self._stream_fd = None # Streamlink file descriptor
+        
+        # Processes for decoding
+        self._video_process: Optional[subprocess.Popen] = None
         self._audio_process: Optional[subprocess.Popen] = None
+        
         self._is_running = False
         
         # Check for ffmpeg
         self._ffmpeg_path = shutil.which("ffmpeg")
         if not self._ffmpeg_path:
-            logger.warning("FFmpeg not found in PATH. Audio capture will be disabled.")
+            logger.warning("FFmpeg not found in PATH. Capture will be limited.")
         
-        # Audio buffer
-        self._audio_queue: Queue = Queue(maxsize=100)
+        # Buffers
+        self._raw_queue: Queue = Queue(maxsize=100) # For raw chunks
+        self._audio_queue: Queue = Queue(maxsize=100) # For decoded audio
+        self._video_queue: Queue = Queue(maxsize=10) # For decoded video frames
+        
+        # Threads
+        self._stream_thread: Optional[threading.Thread] = None
         self._audio_thread: Optional[threading.Thread] = None
+        self._video_thread: Optional[threading.Thread] = None
+        
+        # Stats
+        self._fps = 30.0
+        self._width = 1920
+        self._height = 1080
         
         logger.info(f"StreamCapture initialized for {self.platform.value}: {self.channel_id}")
     
@@ -102,8 +117,8 @@ class StreamCapture:
             logger.warning("Stream capture already running")
             return True
         
-        if not CV2_AVAILABLE:
-            logger.error("OpenCV (cv2) not available - install with: pip install opencv-python")
+        if not self._ffmpeg_path:
+            logger.error("FFmpeg is required for this capture mode")
             return False
         
         # Resolve stream URL
@@ -111,156 +126,213 @@ class StreamCapture:
         if not self._stream_url:
             return False
         
-        # Initialize video capture
-        self._video_capture = cv2.VideoCapture(self._stream_url)
-        if not self._video_capture.isOpened():
-            logger.error("Failed to open video capture")
+        # Open stream with streamlink
+        try:
+            streams = streamlink.streams(self.url)
+            if self.quality in streams:
+                self._stream_fd = streams[self.quality].open()
+            elif "best" in streams:
+                self._stream_fd = streams["best"].open()
+            else:
+                self._stream_fd = streams[list(streams.keys())[0]].open()
+        except Exception as e:
+            logger.error(f"Failed to open stream: {e}")
             return False
-        
-        # Start audio capture in background thread
-        self._start_audio_capture()
-        
+
         self._is_running = True
+        
+        # Start decoding processes
+        self._start_decoders()
+        
+        # Start stream reader thread
+        self._stream_thread = threading.Thread(target=self._stream_reader, daemon=True)
+        self._stream_thread.start()
+        
         logger.info("Stream capture started successfully")
         return True
     
-    def _start_audio_capture(self):
-        """Start FFmpeg process for audio capture"""
-        if not self._ffmpeg_path:
-            logger.warning("FFmpeg not found - skipping audio capture")
-            return
-
-        # FFmpeg command to extract audio as raw PCM
-        # Added -re to read input at native frame rate to prevent buffer overflow
-        # Added -thread_queue_size to increase buffer
-        cmd = [
+    def _start_decoders(self):
+        """Start FFmpeg processes for video and audio decoding"""
+        
+        # Video Decoder: Reads from pipe, outputs raw video frames
+        # We scale to 640x360 for analysis to save CPU
+        video_cmd = [
             self._ffmpeg_path,
-            "-thread_queue_size", "1024",
-            "-i", self._stream_url,
-            "-vn",  # No video
-            "-acodec", "pcm_s16le",  # 16-bit PCM
-            "-ar", "44100",  # 44.1kHz sample rate
-            "-ac", "1",  # Mono
-            "-f", "s16le",  # Raw PCM format
-            "-loglevel", "warning", # Show warnings
-            "pipe:1"  # Output to stdout
+            "-i", "pipe:0",
+            "-vf", "fps=15,scale=640:360", # Low FPS and resolution for analysis
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-loglevel", "error",
+            "pipe:1"
         ]
         
-        try:
-            self._audio_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,  # Capture stderr
-                bufsize=4096
-            )
-            
-            # Start thread to read audio data
-            self._audio_thread = threading.Thread(target=self._audio_reader, daemon=True)
-            self._audio_thread.start()
-            logger.info(f"Audio capture started with command: {' '.join(cmd)}")
-            
-        except Exception as e:
-            logger.error(f"Error starting audio capture: {e}")
-            self._audio_process = None
-    
+        self._video_process = subprocess.Popen(
+            video_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=10**7 # Large buffer
+        )
+        
+        # Audio Decoder: Reads from pipe, outputs raw audio samples
+        audio_cmd = [
+            self._ffmpeg_path,
+            "-i", "pipe:0",
+            "-vn",
+            "-f", "s16le",
+            "-acodec", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "1",
+            "-loglevel", "error",
+            "pipe:1"
+        ]
+        
+        self._audio_process = subprocess.Popen(
+            audio_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=10**6
+        )
+        
+        # Start reader threads
+        self._video_thread = threading.Thread(target=self._video_reader, daemon=True)
+        self._video_thread.start()
+        
+        self._audio_thread = threading.Thread(target=self._audio_reader, daemon=True)
+        self._audio_thread.start()
+
+    def _stream_reader(self):
+        """Reads raw chunks from stream and distributes them"""
+        chunk_size = 32 * 1024 # 32KB chunks
+        
+        while self._is_running and self._stream_fd:
+            try:
+                data = self._stream_fd.read(chunk_size)
+                if not data:
+                    logger.warning("Stream ended")
+                    break
+                
+                # 1. Send to raw buffer (for clipping)
+                try:
+                    self._raw_queue.put_nowait(data)
+                except:
+                    pass # Drop if full (shouldn't happen if consumer is fast)
+                
+                # 2. Send to Video Decoder
+                if self._video_process and self._video_process.stdin:
+                    try:
+                        self._video_process.stdin.write(data)
+                        self._video_process.stdin.flush()
+                    except Exception:
+                        pass
+                
+                # 3. Send to Audio Decoder
+                if self._audio_process and self._audio_process.stdin:
+                    try:
+                        self._audio_process.stdin.write(data)
+                        self._audio_process.stdin.flush()
+                    except Exception:
+                        pass
+                        
+            except Exception as e:
+                logger.error(f"Stream reader error: {e}")
+                break
+        
+        self._is_running = False
+
+    def _video_reader(self):
+        """Reads decoded video frames for analysis"""
+        # 640x360 * 3 bytes (BGR)
+        frame_size = 640 * 360 * 3
+        
+        while self._is_running and self._video_process:
+            try:
+                data = self._video_process.stdout.read(frame_size)
+                if len(data) == frame_size:
+                    frame = np.frombuffer(data, dtype=np.uint8).reshape((360, 640, 3))
+                    
+                    # Clear queue if full to always have latest frame
+                    if self._video_queue.full():
+                        try:
+                            self._video_queue.get_nowait()
+                        except:
+                            pass
+                    
+                    self._video_queue.put(frame)
+                else:
+                    if not data:
+                        break
+            except Exception as e:
+                logger.error(f"Video reader error: {e}")
+                break
+
     def _audio_reader(self):
-        """Background thread to read audio data from FFmpeg"""
-        chunk_size = 4410  # ~100ms of audio at 44.1kHz mono
-        bytes_read = 0
+        """Reads decoded audio samples for analysis"""
+        chunk_size = 4410 * 2 # ~100ms
         
         while self._is_running and self._audio_process:
             try:
-                # Use a larger read buffer to prevent pipe blocking
-                data = self._audio_process.stdout.read(chunk_size * 2)  # 2 bytes per sample
+                data = self._audio_process.stdout.read(chunk_size)
                 if data:
-                    bytes_read += len(data)
-                    if bytes_read < 100000: # Log first few chunks
-                         logger.debug(f"Read {len(data)} bytes of audio data")
-
-                    # Convert to numpy array
                     audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-                    try:
-                        self._audio_queue.put_nowait(audio_data)
-                    except:
-                        # Queue full, drop oldest
+                    
+                    if self._audio_queue.full():
                         try:
                             self._audio_queue.get_nowait()
-                            self._audio_queue.put_nowait(audio_data)
                         except:
                             pass
+                            
+                    self._audio_queue.put(audio_data)
                 else:
-                    # Process exited or no data
-                    if self._audio_process.poll() is not None:
-                        stderr_out = self._audio_process.stderr.read()
-                        if stderr_out:
-                            logger.error(f"FFmpeg audio capture failed: {stderr_out.decode('utf-8', errors='ignore')}")
                     break
             except Exception as e:
                 logger.error(f"Audio reader error: {e}")
                 break
-    
+
+    def read_chunk(self) -> Optional[bytes]:
+        """Read a raw stream chunk"""
+        try:
+            return self._raw_queue.get_nowait()
+        except Empty:
+            return None
+
     def read_frame(self) -> Tuple[bool, Optional[np.ndarray]]:
-        """
-        Read a single video frame.
-        
-        Returns:
-            Tuple of (success, frame) where frame is BGR numpy array
-        """
-        if not self._video_capture or not self._is_running:
-            return False, None
-        
-        ret, frame = self._video_capture.read()
-        return ret, frame
-    
+        """Read a decoded video frame (low res for analysis)"""
+        try:
+            frame = self._video_queue.get_nowait()
+            return True, frame
+        except Empty:
+            return True, None # Return True to keep loop alive, but None frame
+
     def read_audio(self, timeout: float = 0.1) -> Optional[np.ndarray]:
-        """
-        Read audio chunk from buffer.
-        
-        Args:
-            timeout: How long to wait for audio data
-            
-        Returns:
-            Audio samples as float32 numpy array, or None if no data
-        """
+        """Read decoded audio chunk"""
         try:
             return self._audio_queue.get(timeout=timeout)
         except Empty:
             return None
     
     def get_frame_rate(self) -> float:
-        """Get the stream's frame rate"""
-        if self._video_capture:
-            return self._video_capture.get(cv2.CAP_PROP_FPS) or 30.0
-        return 30.0
+        return 30.0 # Approximate
     
     def get_resolution(self) -> Tuple[int, int]:
-        """Get stream resolution as (width, height)"""
-        if self._video_capture:
-            w = int(self._video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(self._video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            return w, h
-        return 1920, 1080
-    
-    def frames(self) -> Generator[np.ndarray, None, None]:
-        """Generator that yields frames continuously"""
-        while self._is_running:
-            ret, frame = self.read_frame()
-            if ret and frame is not None:
-                yield frame
-            else:
-                break
+        return 1920, 1080 # Approximate
     
     def stop(self):
         """Stop capturing"""
         self._is_running = False
         
-        if self._video_capture:
-            self._video_capture.release()
-            self._video_capture = None
+        if self._stream_fd:
+            try:
+                self._stream_fd.close()
+            except:
+                pass
+        
+        if self._video_process:
+            self._video_process.terminate()
         
         if self._audio_process:
             self._audio_process.terminate()
-            self._audio_process = None
         
         logger.info("Stream capture stopped")
     
@@ -272,45 +344,5 @@ class StreamCapture:
         self.stop()
         return False
 
-
 def get_stream_capture(url: str, quality: str = "best"):
-    """
-    Factory function to get the best available stream capture implementation.
-    
-    Returns OpenCV-based capture if available, otherwise FFmpeg-based capture.
-    
-    Args:
-        url: Stream URL
-        quality: Stream quality
-        
-    Returns:
-        StreamCapture or FFmpegStreamCapture instance
-    """
-    if CV2_AVAILABLE:
-        logger.info("Using OpenCV-based stream capture")
-        return StreamCapture(url, quality)
-    else:
-        logger.info("OpenCV not available, using FFmpeg-based stream capture")
-        from .ffmpeg_capture import FFmpegStreamCapture
-        return FFmpegStreamCapture(url, quality)
-
-
-if __name__ == "__main__":
-    import sys
-    logging.basicConfig(level=logging.INFO)
-    
-    if len(sys.argv) < 2:
-        print("Usage: python stream_capture.py <stream_url>")
-        sys.exit(1)
-    
-    url = sys.argv[1]
-    
-    # Use factory function to get best available implementation
-    with get_stream_capture(url) as stream:
-        print(f"Resolution: {stream.get_resolution()}")
-        print(f"FPS: {stream.get_frame_rate()}")
-        
-        for i, frame in enumerate(stream.frames()):
-            print(f"Frame {i}: {frame.shape}")
-            if i >= 10:
-                break
+    return StreamCapture(url, quality)

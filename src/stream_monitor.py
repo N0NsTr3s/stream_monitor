@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config, config
-from .monitors.stream_capture import get_stream_capture, CV2_AVAILABLE
+from .monitors.stream_capture import get_stream_capture, StreamCapture, CV2_AVAILABLE
 from .monitors.chat_twitch import TwitchChatMonitor
 from .monitors.chat_youtube import YouTubeChatMonitor
 from .monitors.chat_kick import KickChatMonitor
@@ -21,12 +21,7 @@ from .analysis.video_analyzer import VideoAnalyzer
 from .analysis.scoring_engine import ScoringEngine, ClipTrigger
 from .utils.platform_detector import PlatformDetector, Platform
 from .utils.circular_buffer import CircularBuffer
-
-# Use OpenCV clipper if available, otherwise FFmpeg clipper
-if CV2_AVAILABLE:
-    from .utils.clipper import Clipper
-else:
-    from .utils.ffmpeg_clipper import FFmpegClipper as Clipper
+from .utils.clipper import Clipper
 
 logger = logging.getLogger(__name__)
 
@@ -180,22 +175,32 @@ class StreamMonitor:
         else:
             logger.warning("❌ Failed to save clip")
     
+    def _stream_loop(self):
+        """Loop to read raw stream chunks and buffer them"""
+        logger.info("Stream buffering loop started")
+        while self._is_running and not self._shutdown_event.is_set():
+            try:
+                chunk = self._stream.read_chunk()
+                if chunk:
+                    self._buffer.add_stream_chunk(chunk, time.time())
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                logger.error(f"Stream loop error: {e}")
+                time.sleep(0.1)
+        logger.info("Stream buffering loop stopped")
+
     def _video_loop(self):
-        """Main video processing loop"""
-        logger.info("Video processing loop started")
+        """Main video processing loop (Analysis only)"""
+        logger.info("Video analysis loop started")
         
         # Use actual stream FPS if available, otherwise default to 30
         detected_fps = self._stream.get_frame_rate() if self._stream else 0
         target_fps = self.config.clip.fps
         
         if detected_fps > 0:
-            # If detected FPS is significantly lower than target (e.g. 30 vs 60),
-            # and user requested 60, we might want to trust the user if detection is flaky.
-            # However, if we force 60 on a 30 stream, we just duplicate frames or sleep less.
-            # For HLS, 30 is often reported even for 60fps streams.
             if detected_fps < target_fps - 5:
                 logger.warning(f"Detected FPS ({detected_fps}) is lower than target ({target_fps}). Forcing target FPS.")
-                # We use the configured FPS as the truth
             else:
                 target_fps = detected_fps
         
@@ -218,14 +223,9 @@ class StreamMonitor:
                 ret, frame = self._stream.read_frame()
                 
                 if not ret or frame is None:
-                    logger.warning("Failed to read frame")
+                    # logger.warning("Failed to read frame") # Too noisy if analysis is slower
                     time.sleep(0.1)
                     continue
-                
-                current_time = time.time()
-                
-                # Add to buffer
-                self._buffer.add_video_frame(frame, current_time)
                 
                 # Analyze video
                 metrics = self._video_analyzer.analyze(frame)
@@ -236,8 +236,6 @@ class StreamMonitor:
                 self._frames_processed += 1
                 
                 # Rate limit processing
-                # Only sleep if we are processing faster than the stream provides frames
-                # (which is unlikely if read_frame blocks)
                 proc_time = time.time() - start_time
                 wait = frame_interval - proc_time
                 if wait > 0.001: # Only sleep if significant time remains
@@ -249,7 +247,7 @@ class StreamMonitor:
                 logger.error(f"Video loop error: {e}")
                 time.sleep(0.1)
         
-        logger.info("Video processing loop stopped")
+        logger.info("Video analysis loop stopped")
     
     def _audio_loop(self):
         """Audio processing loop"""
@@ -261,11 +259,6 @@ class StreamMonitor:
                 audio_data = self._stream.read_audio(timeout=0.1)
                 
                 if audio_data is not None:
-                    current_time = time.time()
-                    
-                    # Add to buffer
-                    self._buffer.add_audio_chunk(audio_data, current_time)
-                    
                     # Analyze audio
                     metrics = self._audio_analyzer.analyze(audio_data)
                     
@@ -394,6 +387,7 @@ class StreamMonitor:
         
         # Start processing threads
         threads = [
+            ("stream", self._stream_loop), # New loop for buffering
             ("video", self._video_loop),
             ("audio", self._audio_loop),
             ("chat", self._chat_loop),
