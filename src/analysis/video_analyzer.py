@@ -97,10 +97,24 @@ class VideoAnalyzer:
             brightness_diff = 0.0
             
             if self._prev_frame is not None:
-                # Calculate absolute difference
-                frame_diff = cv2.absdiff(self._prev_frame, gray)
-                # Mean difference is our motion score
-                motion_score = float(np.mean(frame_diff))
+                # ROBUST MOTION DETECTION:
+                # 1. Apply Gaussian blur to reduce noise/grain
+                blurred_prev = cv2.GaussianBlur(self._prev_frame, (21, 21), 0)
+                blurred_curr = cv2.GaussianBlur(gray, (21, 21), 0)
+                
+                # 2. Calculate absolute difference
+                frame_delta = cv2.absdiff(blurred_prev, blurred_curr)
+                
+                # 3. Threshold: Only count pixels that changed significantly (> 25 intensity)
+                _, thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)
+                
+                # 4. Dilate to fill in gaps
+                thresh = cv2.dilate(thresh, None, iterations=2)
+                
+                # 5. Count moving pixels and normalize by total pixels
+                motion_pixels = cv2.countNonZero(thresh)
+                h, w = gray.shape
+                motion_score = (motion_pixels / (h * w)) * 100  # Scale to 0-100 range
                 
                 # Calculate brightness change (sudden dark/light)
                 if self._prev_brightness is not None:

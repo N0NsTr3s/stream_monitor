@@ -168,11 +168,12 @@ class TwitchChatMonitor(BaseChatMonitor):
                     if r.status != 200:
                         text = await r.text()
                         logger.error("Failed to refresh Twitch token (%s): %s", r.status, text)
-                        return False
+                        # Attempt full re-authentication if refresh failed
+                        return await self._attempt_full_reauth()
                     body = await r.json()
         except Exception as e:
             logger.error("Exception refreshing Twitch token: %s", e)
-            return False
+            return await self._attempt_full_reauth()
 
         # Update tokens
         new_access = body.get("access_token")
@@ -214,6 +215,79 @@ class TwitchChatMonitor(BaseChatMonitor):
             logger.debug("Could not persist tokens to .env; continuing without persistence")
 
         return True
+    
+    async def _attempt_full_reauth(self) -> bool:
+        """
+        Attempt full re-authentication when refresh token is also expired.
+        Uses the TwitchAuth class to open browser for user authorization.
+        """
+        if not (self.client_id and self.client_secret):
+            logger.error("Cannot re-authenticate: missing client_id or client_secret")
+            return False
+        
+        try:
+            from ..auth.twitch_auth import TwitchAuth
+            
+            logger.warning("Refresh token expired. Starting full re-authentication...")
+            print("\n" + "="*60)
+            print("⚠️  Twitch token expired! Re-authentication required.")
+            print("="*60)
+            
+            auth = TwitchAuth(self.client_id, self.client_secret)
+            tokens = await auth.authenticate(open_browser=True)
+            
+            if tokens:
+                self.oauth_token = tokens.access_token
+                self.refresh_token = tokens.refresh_token
+                
+                # Update .env file
+                self._update_env_file(tokens.access_token, tokens.refresh_token)
+                
+                logger.info("Re-authentication successful! Tokens updated.")
+                return True
+            else:
+                logger.error("Re-authentication failed")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Full re-authentication failed: {e}")
+            return False
+    
+    def _update_env_file(self, access_token: str, refresh_token: str):
+        """Update the .env file with new tokens"""
+        try:
+            env_path = ".env"
+            lines = []
+            
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            
+            def set_key(lines, key, value):
+                key_eq = key + "="
+                for i, L in enumerate(lines):
+                    if L.startswith(key_eq):
+                        lines[i] = f"{key}={value}\n"
+                        return lines
+                lines.append(f"{key}={value}\n")
+                return lines
+            
+            lines = set_key(lines, "TWITCH_OAUTH_TOKEN", access_token)
+            lines = set_key(lines, "TWITCH_ACCESS_TOKEN", access_token)
+            lines = set_key(lines, "TWITCH_REFRESH_TOKEN", refresh_token)
+            
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            
+            # Also update environment variables for current session
+            os.environ["TWITCH_OAUTH_TOKEN"] = access_token
+            os.environ["TWITCH_ACCESS_TOKEN"] = access_token
+            os.environ["TWITCH_REFRESH_TOKEN"] = refresh_token
+            
+            logger.info("Updated .env file with new Twitch tokens")
+            
+        except Exception as e:
+            logger.error(f"Failed to update .env file: {e}")
     
     @property
     def platform_name(self) -> str:

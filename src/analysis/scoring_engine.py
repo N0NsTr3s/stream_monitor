@@ -1,12 +1,14 @@
-"""
-Scoring Engine - Combines signals from audio, video, and chat analyzers
-"""
+
+"""Scoring Engine - Combines signals from audio, video, and chat analyzers"""
+
 import logging
 import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Deque, Callable, List
+
+from ..utils.stats import RollingStats
 
 logger = logging.getLogger(__name__)
 
@@ -65,21 +67,7 @@ class ScoringEngine:
         cooldown_seconds: float = 10.0,
         calibration_seconds: float = 20.0
     ):
-        """
-        Initialize scoring engine.
-        
-        Args:
-            audio_weight: Weight for audio signal (0.0-1.0)
-            chat_weight: Weight for chat signal (0.0-1.0)
-            video_weight: Weight for video signal (0.0-1.0)
-            trigger_threshold: Score to start recording (0.0-1.0)
-            release_threshold: Score to stop recording (0.0-1.0)
-            pre_roll_seconds: Seconds before trigger to include in clip
-            post_roll_seconds: Seconds after release to include in clip
-            min_clip_duration: Minimum clip duration
-            cooldown_seconds: Cooldown between clips
-            calibration_seconds: Initial calibration period in seconds
-        """
+
         self.audio_weight = audio_weight
         self.chat_weight = chat_weight
         self.video_weight = video_weight
@@ -100,6 +88,11 @@ class ScoringEngine:
         
         # Score history
         self._history: Deque[ScoreEvent] = deque(maxlen=600)  # ~60 seconds at 10Hz
+        
+        # Rolling stats for anomaly detection (5 minutes of history at ~1 update/sec)
+        self._audio_stats = RollingStats(window_size=300)
+        self._chat_stats = RollingStats(window_size=300)
+        self._video_stats = RollingStats(window_size=300)
         
         # Current scores
         self._audio_score = 0.0
@@ -143,31 +136,43 @@ class ScoringEngine:
         """
         timestamp = time.time()
         
-        # Update individual scores
+        # Update individual scores and rolling stats
         if audio_score is not None:
             self._audio_score = audio_score
+            self._audio_stats.update(audio_score)
         if chat_score is not None:
             self._chat_score = chat_score
+            self._chat_stats.update(chat_score)
         if video_score is not None:
             self._video_score = video_score
+            self._video_stats.update(video_score)
         
-        # Calculate combined score
-        # Use a weighted average, but also allow a single very strong signal to boost the score
+        # Check for statistical anomalies (spikes above rolling average)
+        # Only trigger if values are significantly above their recent history
+        audio_spike = self._audio_stats.is_anomaly(self._audio_score, threshold_sigma=2.5)
+        chat_spike = self._chat_stats.is_anomaly(self._chat_score, threshold_sigma=2.0)
+        video_spike = self._video_stats.is_anomaly(self._video_score, threshold_sigma=3.0)
+        
+        # Calculate combined score using weighted average
         weighted_score = (
             self._audio_score * self.audio_weight +
             self._chat_score * self.chat_weight +
             self._video_score * self.video_weight
         )
         
-        # If any single metric is very high (e.g. > 0.8), it can "carry" the score
-        # This ensures a scream (high audio) triggers a clip even if chat is silent
-        max_single_score = max(self._audio_score, self._chat_score, self._video_score)
+        # Apply spike-based gating: only allow high scores if there's a real spike
+        # This prevents constant high baseline from triggering clips
+        spike_count = sum([audio_spike, chat_spike, video_spike])
         
-        if max_single_score > 0.8:
-            # Boost the score towards the max single score
-            self._combined_score = max(weighted_score, max_single_score * 0.9)
-        else:
+        if spike_count >= 2:
+            # Multiple signals spiking = definitely worth clipping
             self._combined_score = weighted_score
+        elif spike_count == 1 and weighted_score >= 0.6:
+            # Single strong spike with decent overall score
+            self._combined_score = weighted_score * 0.85
+        else:
+            # No statistical spikes - dampen the score significantly
+            self._combined_score = weighted_score * 0.5
         
         # Record to history
         event = ScoreEvent(
@@ -216,7 +221,7 @@ class ScoringEngine:
             if self._combined_score < self.release_threshold:
                 # Only release if we've met the minimum duration requirement
                 # Projected duration = current duration + post_roll
-                current_duration = timestamp - self._current_trigger.start_time
+                current_duration = timestamp - self._current_trigger.start_time # type: ignore
                 projected_duration = current_duration + self.post_roll_seconds
                 
                 if projected_duration >= self.min_clip_duration:

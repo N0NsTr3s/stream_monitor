@@ -18,3 +18,8 @@ aiohttp>=3.9.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# Auth
+flask>=2.0.0
+authlib>=1.0.0
+requests>=2.27.0

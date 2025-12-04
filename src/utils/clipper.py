@@ -150,7 +150,7 @@ class Clipper:
         end_time: float,
         prefix: str = "clip",
         reason: str = "",
-        callback: Optional[callable] = None
+        callback: Optional[callable] = None # type: ignore
     ):
         """Save a clip asynchronously"""
         def save_task():
