@@ -45,7 +45,15 @@ class ClipTrigger:
 
 class ScoringEngine:
     """
-    Combines signals from multiple analyzers to generate an importance score.
+    Combines signals from multiple analyzers using Z-Score based adaptive scoring.
+    
+    Instead of fixed thresholds, we use Z-Scores to detect moments that are
+    significantly more intense than the stream's rolling average.
+    
+    Z-Score Thresholds:
+        2.0 = Sensitive (Clips often)
+        3.0 = Standard (Good moments)
+        4.0 = Strict (Only massive spikes)
     
     Manages a state machine for clip recording:
     - IDLE: Monitoring, waiting for score to exceed threshold
@@ -57,10 +65,10 @@ class ScoringEngine:
     def __init__(
         self,
         audio_weight: float = 0.5,
-        chat_weight: float = 0.5,
-        video_weight: float = 0.5,
-        trigger_threshold: float = 0.7,
-        release_threshold: float = 0.3,
+        chat_weight: float = 0.4,
+        video_weight: float = 0.1,
+        trigger_threshold: float = 3.0,  # Z-Score threshold (3.0 = 3 sigma)
+        release_threshold: float = 1.0,  # Z-Score to stop recording
         pre_roll_seconds: float = 3.0,
         post_roll_seconds: float = 5.0,
         min_clip_duration: float = 5.0,
@@ -106,8 +114,15 @@ class ScoringEngine:
     
     @property
     def is_calibrating(self) -> bool:
-        """Check if currently in calibration phase"""
-        return (time.time() - self._start_time) < self.calibration_seconds
+        """Check if currently in calibration phase (need enough samples for Z-scores)"""
+        time_ok = (time.time() - self._start_time) >= self.calibration_seconds
+        # Also require minimum samples in rolling stats
+        samples_ok = (
+            self._audio_stats.count >= 30 and
+            self._chat_stats.count >= 10 and  # Chat updates slower
+            self._video_stats.count >= 30
+        )
+        return not (time_ok and samples_ok)
 
     def on_clip_start(self, callback: Callable[[ClipTrigger], None]):
         """Register callback for when a clip recording should start"""
@@ -124,7 +139,7 @@ class ScoringEngine:
         video_score: Optional[float] = None
     ) -> float:
         """
-        Update scores and process state machine.
+        Update scores and process state machine using Z-Score adaptive scoring.
         
         Args:
             audio_score: Current audio score (0.0-1.0), None to keep previous
@@ -132,7 +147,7 @@ class ScoringEngine:
             video_score: Current video score (0.0-1.0), None to keep previous
             
         Returns:
-            Combined score (0.0-1.0)
+            Combined Z-Score (higher = more intense relative to average)
         """
         timestamp = time.time()
         
@@ -147,32 +162,20 @@ class ScoringEngine:
             self._video_score = video_score
             self._video_stats.update(video_score)
         
-        # Check for statistical anomalies (spikes above rolling average)
-        # Only trigger if values are significantly above their recent history
-        audio_spike = self._audio_stats.is_anomaly(self._audio_score, threshold_sigma=2.5)
-        chat_spike = self._chat_stats.is_anomaly(self._chat_score, threshold_sigma=2.0)
-        video_spike = self._video_stats.is_anomaly(self._video_score, threshold_sigma=3.0)
+        # Get Z-Scores (How weird/abnormal is this value compared to recent history?)
+        # A score of 3.0 means "Very High Spike" (3 standard deviations above average)
+        audio_z = self._audio_stats.get_z_score(self._audio_score)
+        chat_z = self._chat_stats.get_z_score(self._chat_score)
+        video_z = self._video_stats.get_z_score(self._video_score)
         
-        # Calculate combined score using weighted average
-        weighted_score = (
-            self._audio_score * self.audio_weight +
-            self._chat_score * self.chat_weight +
-            self._video_score * self.video_weight
+        # Weighted combination of Z-Scores
+        # We value Audio and Chat more than Video (webcams are noisy)
+        # We ignore negative Z-Scores (quiet/still moments) using max(0, ...)
+        self._combined_score = (
+            (max(0.0, audio_z) * self.audio_weight) + 
+            (max(0.0, chat_z) * self.chat_weight) + 
+            (max(0.0, video_z) * self.video_weight)
         )
-        
-        # Apply spike-based gating: only allow high scores if there's a real spike
-        # This prevents constant high baseline from triggering clips
-        spike_count = sum([audio_spike, chat_spike, video_spike])
-        
-        if spike_count >= 2:
-            # Multiple signals spiking = definitely worth clipping
-            self._combined_score = weighted_score
-        elif spike_count == 1 and weighted_score >= 0.6:
-            # Single strong spike with decent overall score
-            self._combined_score = weighted_score * 0.85
-        else:
-            # No statistical spikes - dampen the score significantly
-            self._combined_score = weighted_score * 0.5
         
         # Record to history
         event = ScoreEvent(
@@ -355,18 +358,33 @@ class ScoringEngine:
     
     @property
     def audio_score(self) -> float:
-        """Get current audio score"""
+        """Get current audio score (raw value)"""
         return self._audio_score
     
     @property
     def chat_score(self) -> float:
-        """Get current chat score"""
+        """Get current chat score (raw value)"""
         return self._chat_score
     
     @property
     def video_score(self) -> float:
-        """Get current video/frame score"""
+        """Get current video/frame score (raw value)"""
         return self._video_score
+    
+    @property
+    def audio_z_score(self) -> float:
+        """Get current audio Z-Score (how abnormal compared to average)"""
+        return self._audio_stats.get_z_score(self._audio_score)
+    
+    @property
+    def chat_z_score(self) -> float:
+        """Get current chat Z-Score (how abnormal compared to average)"""
+        return self._chat_stats.get_z_score(self._chat_score)
+    
+    @property
+    def video_z_score(self) -> float:
+        """Get current video Z-Score (how abnormal compared to average)"""
+        return self._video_stats.get_z_score(self._video_score)
     
     @property
     def current_trigger(self) -> Optional[ClipTrigger]:

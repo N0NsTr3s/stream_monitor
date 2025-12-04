@@ -31,15 +31,22 @@ class ClipConfig:
 
 @dataclass
 class ScoringConfig:
-    """Configuration for the scoring engine"""
-    # Weights for different signals (should sum to 1.0)
-    audio_weight: float = 0.4
+    """Configuration for the scoring engine (Z-Score based)"""
+    # Weights for different signals (should sum to ~1.0)
+    # Audio and Chat valued more than Video (webcams are noisy)
+    audio_weight: float = 0.5
     chat_weight: float = 0.4
-    video_weight: float = 0.2
+    video_weight: float = 0.1
     
-    # Thresholds
-    trigger_threshold: float = 0.85  # Score to start recording (Increased from 0.7)
-    release_threshold: float = 0.4  # Score to stop recording (Increased from 0.3)
+    # Z-Score Thresholds (adaptive to stream's baseline)
+    # 2.0 = Sensitive (Clips often)
+    # 3.0 = Standard (Good moments)
+    # 4.0 = Strict (Only massive spikes)
+    trigger_threshold: float = 3.0  # Combined Z-Score to start recording
+    release_threshold: float = 1.0  # Combined Z-Score to stop recording
+    
+    # Calibration - time to gather baseline data for Z-scores
+    calibration_seconds: float = 60.0  # 60 seconds to build rolling average
     
     # Audio settings
     audio_rms_baseline: float = 0.09  # Lower baseline to be more sensitive

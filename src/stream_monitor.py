@@ -119,7 +119,7 @@ class StreamMonitor:
             spike_multiplier=self.config.scoring.video_spike_multiplier
         )
         
-        # Scoring engine
+        # Scoring engine with Z-Score based adaptive thresholds
         self._scoring_engine = ScoringEngine(
             audio_weight=self.config.scoring.audio_weight,
             chat_weight=self.config.scoring.chat_weight,
@@ -128,7 +128,8 @@ class StreamMonitor:
             release_threshold=self.config.scoring.release_threshold,
             pre_roll_seconds=self.config.clip.pre_roll_seconds,
             post_roll_seconds=self.config.clip.post_roll_seconds,
-            min_clip_duration=self.config.clip.min_duration
+            min_clip_duration=self.config.clip.min_duration,
+            calibration_seconds=self.config.scoring.calibration_seconds
         )
         
         # Register clip callbacks
@@ -322,19 +323,19 @@ class StreamMonitor:
                     remaining = max(0, self._scoring_engine.calibration_seconds - elapsed) # type: ignore
                     state_str = f"CALIBRATING ({remaining:.0f}s)"
                 
-                # Get individual scores
-                audio_sc = self._scoring_engine.audio_score # type: ignore
-                chat_sc = self._scoring_engine.chat_score # type: ignore
-                video_sc = self._scoring_engine.video_score # type: ignore
-                combined_sc = self._scoring_engine.current_score # type: ignore
+                # Get Z-Scores (how abnormal each signal is)
+                audio_z = self._scoring_engine.audio_z_score # type: ignore
+                chat_z = self._scoring_engine.chat_z_score # type: ignore
+                video_z = self._scoring_engine.video_z_score # type: ignore
+                combined_z = self._scoring_engine.current_score # type: ignore
                 threshold = self._scoring_engine.trigger_threshold # type: ignore
                 
                 status = (
                     f"\r[{self.platform.value.upper()}] "
-                    f"Score: {combined_sc:.2f}/{threshold:.2f} | "
-                    f"Audio: {audio_sc:.2f} | "
-                    f"Chat: {chat_sc:.2f} | "
-                    f"Video: {video_sc:.2f} | "
+                    f"Z: {combined_z:.1f}/{threshold:.1f}σ | "
+                    f"Audio: {audio_z:+.1f}σ | "
+                    f"Chat: {chat_z:+.1f}σ | "
+                    f"Video: {video_z:+.1f}σ | "
                     f"State: {state_str:20} | "
                     f"Buffer: {self._buffer.get_duration():.1f}s | " # type: ignore
                     f"Clips: {self._clips_created} | "
