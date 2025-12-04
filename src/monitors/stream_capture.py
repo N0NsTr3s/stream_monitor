@@ -78,7 +78,7 @@ class StreamCapture:
     def _resolve_stream_url(self) -> Optional[str]:
         """Resolve the stream URL using streamlink"""
         try:
-            streams = streamlink.streams(self.url)
+            streams = streamlink.streams(self.url) # type: ignore
             
             if not streams:
                 logger.error(f"No streams found for {self.url}")
@@ -99,7 +99,7 @@ class StreamCapture:
             logger.info(f"Resolved stream URL: {stream_url[:100]}...")
             return stream_url
             
-        except streamlink.StreamlinkError as e:
+        except streamlink.StreamlinkError as e: # type: ignore
             logger.error(f"Streamlink error: {e}")
             return None
         except Exception as e:
@@ -128,7 +128,7 @@ class StreamCapture:
         
         # Open stream with streamlink
         try:
-            streams = streamlink.streams(self.url)
+            streams = streamlink.streams(self.url) # type: ignore
             if self.quality in streams:
                 self._stream_fd = streams[self.quality].open()
             elif "best" in streams:
@@ -248,7 +248,7 @@ class StreamCapture:
         
         while self._is_running and self._video_process:
             try:
-                data = self._video_process.stdout.read(frame_size)
+                data = self._video_process.stdout.read(frame_size) # type: ignore
                 if len(data) == frame_size:
                     frame = np.frombuffer(data, dtype=np.uint8).reshape((360, 640, 3))
                     
@@ -273,7 +273,7 @@ class StreamCapture:
         
         while self._is_running and self._audio_process:
             try:
-                data = self._audio_process.stdout.read(chunk_size)
+                data = self._audio_process.stdout.read(chunk_size) # type: ignore
                 if data:
                     audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                     

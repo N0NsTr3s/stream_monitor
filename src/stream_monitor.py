@@ -81,13 +81,13 @@ class StreamMonitor:
         """Create platform-specific chat monitor"""
         if self.platform == Platform.TWITCH:
             return TwitchChatMonitor(
-                self.channel_id,
+                self.channel_id, # type: ignore
                 oauth_token=self.config.twitch.oauth_token
             )
         elif self.platform == Platform.YOUTUBE:
-            return YouTubeChatMonitor(self.channel_id)
+            return YouTubeChatMonitor(self.channel_id) # type: ignore
         elif self.platform == Platform.KICK:
-            return KickChatMonitor(self.channel_id)
+            return KickChatMonitor(self.channel_id) # type: ignore
         else:
             return None
     
@@ -161,7 +161,7 @@ class StreamMonitor:
         self._clipper.save_clip_async(
             self._buffer,
             trigger.start_time,
-            trigger.end_time,
+            trigger.end_time, # type: ignore
             prefix=f"{self.platform.value}_{self.channel_id}",
             reason=trigger.reason,
             callback=self._on_clip_saved
@@ -180,9 +180,9 @@ class StreamMonitor:
         logger.info("Stream buffering loop started")
         while self._is_running and not self._shutdown_event.is_set():
             try:
-                chunk = self._stream.read_chunk()
+                chunk = self._stream.read_chunk() # type: ignore
                 if chunk:
-                    self._buffer.add_stream_chunk(chunk, time.time())
+                    self._buffer.add_stream_chunk(chunk, time.time()) # type: ignore
                 else:
                     time.sleep(0.01)
             except Exception as e:
@@ -220,7 +220,7 @@ class StreamMonitor:
                 start_time = time.time()
                 
                 # Read frame - this usually blocks until frame is available
-                ret, frame = self._stream.read_frame()
+                ret, frame = self._stream.read_frame() # type: ignore
                 
                 if not ret or frame is None:
                     # logger.warning("Failed to read frame") # Too noisy if analysis is slower
@@ -228,10 +228,10 @@ class StreamMonitor:
                     continue
                 
                 # Analyze video
-                metrics = self._video_analyzer.analyze(frame)
+                metrics = self._video_analyzer.analyze(frame) # type: ignore
                 
                 # Update scoring engine
-                self._scoring_engine.update(video_score=metrics.normalized_score)
+                self._scoring_engine.update(video_score=metrics.normalized_score) # type: ignore
                 
                 self._frames_processed += 1
                 
@@ -256,14 +256,14 @@ class StreamMonitor:
         while self._is_running and not self._shutdown_event.is_set():
             try:
                 # Read audio chunk
-                audio_data = self._stream.read_audio(timeout=0.1)
+                audio_data = self._stream.read_audio(timeout=0.1) # type: ignore
                 
                 if audio_data is not None:
                     # Analyze audio
-                    metrics = self._audio_analyzer.analyze(audio_data)
+                    metrics = self._audio_analyzer.analyze(audio_data) # type: ignore
                     
                     # Update scoring engine
-                    self._scoring_engine.update(audio_score=metrics.normalized_score)
+                    self._scoring_engine.update(audio_score=metrics.normalized_score) # type: ignore
                 
             except Exception as e:
                 logger.error(f"Audio loop error: {e}")
@@ -278,26 +278,29 @@ class StreamMonitor:
         while self._is_running and not self._shutdown_event.is_set():
             try:
                 # Get chat messages
-                messages = self._chat_monitor.get_all_messages()
+                messages = self._chat_monitor.get_all_messages() # type: ignore
                 
                 for msg in messages:
+                    # DEBUG: Print chat messages
+                    print(f"\n[CHAT] {msg.username}: {msg.message}")
+                    
                     # Add to analyzer
-                    self._chat_analyzer.add_message(
+                    self._chat_analyzer.add_message( # type: ignore
                         msg.username,
                         msg.message,
                         msg.emote_count
                     )
                 
                 # Analyze chat
-                metrics = self._chat_analyzer.analyze()
+                metrics = self._chat_analyzer.analyze() # type: ignore
                 
                 # Get delayed score to align with video latency
-                chat_score = self._chat_analyzer.get_delayed_score(
+                chat_score = self._chat_analyzer.get_delayed_score( # type: ignore
                     latency_seconds=self.config.scoring.chat_latency_seconds
                 )
                 
                 # Update scoring engine
-                self._scoring_engine.update(chat_score=chat_score)
+                self._scoring_engine.update(chat_score=chat_score) # type: ignore
                 
                 time.sleep(0.5)  # Chat analysis rate
                 
@@ -311,19 +314,29 @@ class StreamMonitor:
         """Status display loop"""
         while self._is_running and not self._shutdown_event.is_set():
             try:
-                elapsed = time.time() - self._start_time
+                elapsed = time.time() - self._start_time # type: ignore
                 fps = self._frames_processed / max(elapsed, 1)
                 
-                state_str = self._scoring_engine.state.value
-                if self._scoring_engine.is_calibrating:
-                    remaining = max(0, self._scoring_engine.calibration_seconds - elapsed)
+                state_str = self._scoring_engine.state.value # type: ignore
+                if self._scoring_engine.is_calibrating: # type: ignore
+                    remaining = max(0, self._scoring_engine.calibration_seconds - elapsed) # type: ignore
                     state_str = f"CALIBRATING ({remaining:.0f}s)"
+                
+                # Get individual scores
+                audio_sc = self._scoring_engine.audio_score # type: ignore
+                chat_sc = self._scoring_engine.chat_score # type: ignore
+                video_sc = self._scoring_engine.video_score # type: ignore
+                combined_sc = self._scoring_engine.current_score # type: ignore
+                threshold = self._scoring_engine.trigger_threshold # type: ignore
                 
                 status = (
                     f"\r[{self.platform.value.upper()}] "
-                    f"Score: {self._scoring_engine.current_score:.2f} | "
+                    f"Score: {combined_sc:.2f}/{threshold:.2f} | "
+                    f"Audio: {audio_sc:.2f} | "
+                    f"Chat: {chat_sc:.2f} | "
+                    f"Video: {video_sc:.2f} | "
                     f"State: {state_str:20} | "
-                    f"Buffer: {self._buffer.get_duration():.1f}s | "
+                    f"Buffer: {self._buffer.get_duration():.1f}s | " # type: ignore
                     f"Clips: {self._clips_created} | "
                     f"FPS: {fps:.1f} | "
                     f"Runtime: {elapsed:.0f}s"
@@ -354,12 +367,12 @@ class StreamMonitor:
         self._initialize_components()
         
         # Start stream capture
-        if not self._stream.start():
+        if not self._stream.start(): # type: ignore
             logger.error("Failed to start stream capture")
             return False
         
         # Update FPS from stream
-        actual_fps = self._stream.get_frame_rate()
+        actual_fps = self._stream.get_frame_rate() # type: ignore
         if actual_fps <= 0:
             actual_fps = self.config.clip.fps
             logger.warning(f"Could not detect stream FPS, defaulting to {actual_fps}")
@@ -373,9 +386,9 @@ class StreamMonitor:
             output_dir=self.config.clip.output_dir,
             fps=actual_fps
         )
-        self._clipper.resolution = self._stream.get_resolution()
+        self._clipper.resolution = self._stream.get_resolution() # type: ignore
         
-        logger.info(f"Stream: {self._stream.get_resolution()}, {actual_fps} FPS")
+        logger.info(f"Stream: {self._stream.get_resolution()}, {actual_fps} FPS") # type: ignore
         
         # Start chat monitor
         if self._chat_monitor:

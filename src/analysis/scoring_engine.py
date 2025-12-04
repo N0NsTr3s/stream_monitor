@@ -354,6 +354,21 @@ class ScoringEngine:
         return self._combined_score
     
     @property
+    def audio_score(self) -> float:
+        """Get current audio score"""
+        return self._audio_score
+    
+    @property
+    def chat_score(self) -> float:
+        """Get current chat score"""
+        return self._chat_score
+    
+    @property
+    def video_score(self) -> float:
+        """Get current video/frame score"""
+        return self._video_score
+    
+    @property
     def current_trigger(self) -> Optional[ClipTrigger]:
         """Get current clip trigger info"""
         return self._current_trigger
