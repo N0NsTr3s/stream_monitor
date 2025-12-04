@@ -494,15 +494,15 @@ def main():
     parser.add_argument(
         "--trigger-threshold",
         type=float,
-        default=0.7,
-        help="Score threshold to trigger clip (0.0-1.0)"
+        default=4.5,
+        help="Z-Score threshold to trigger clip (standard deviations above mean)"
     )
     
     parser.add_argument(
         "--release-threshold",
         type=float,
-        default=0.3,
-        help="Score threshold to end clip (0.0-1.0)"
+        default=1.5,
+        help="Z-Score threshold to end clip (standard deviations above mean)"
     )
     
     parser.add_argument(

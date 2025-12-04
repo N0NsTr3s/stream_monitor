@@ -292,17 +292,22 @@ class ScoringEngine:
             self._current_trigger.end_time = timestamp
             
             duration = timestamp - self._current_trigger.start_time
+            
+            # Enforce minimum clip duration - extend end time if needed
+            if duration < self.min_clip_duration:
+                # Extend clip to meet minimum duration
+                self._current_trigger.end_time = self._current_trigger.start_time + self.min_clip_duration
+                duration = self.min_clip_duration
+                logger.info(f"Extended clip to minimum duration: {duration:.1f}s")
+            
             logger.info(f"Clip ended. Duration: {duration:.1f}s, Peak: {self._current_trigger.peak_score:.2f}")
             
-            # Only emit if duration is long enough
-            if duration >= self.min_clip_duration:
-                for callback in self._on_clip_end:
-                    try:
-                        callback(self._current_trigger)
-                    except Exception as e:
-                        logger.error(f"Clip end callback error: {e}")
-            else:
-                logger.debug(f"Clip too short ({duration:.1f}s), discarding")
+            # Emit clip
+            for callback in self._on_clip_end:
+                try:
+                    callback(self._current_trigger)
+                except Exception as e:
+                    logger.error(f"Clip end callback error: {e}")
             
             self._last_clip_end = timestamp
             self._current_trigger = None

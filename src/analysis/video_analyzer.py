@@ -109,7 +109,7 @@ class VideoAnalyzer:
                 _, thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)
                 
                 # 4. Dilate to fill in gaps
-                thresh = cv2.dilate(thresh, None, iterations=2)
+                thresh = cv2.dilate(thresh, None, iterations=2) # type: ignore
                 
                 # 5. Count moving pixels and normalize by total pixels
                 motion_pixels = cv2.countNonZero(thresh)

@@ -49,8 +49,8 @@ class ScoringConfig:
     calibration_seconds: float = 60.0  # 60 seconds to build rolling average
     
     # Audio settings
-    audio_rms_baseline: float = 0.09  # Lower baseline to be more sensitive
-    audio_spike_multiplier: float = 2.5  # Lower multiplier to reach max score easier
+    audio_rms_baseline: float = 0.12  # Higher baseline = needs louder audio to trigger
+    audio_spike_multiplier: float = 3.5  # Higher multiplier = needs bigger spikes
     
     # Chat settings
     chat_window_seconds: float = 5.0  # Window for measuring chat velocity
