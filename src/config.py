@@ -42,15 +42,15 @@ class ScoringConfig:
     # 2.0 = Sensitive (Clips often)
     # 3.0 = Standard (Good moments)
     # 4.0 = Strict (Only massive spikes)
-    trigger_threshold: float = 3.0  # Combined Z-Score to start recording
+    trigger_threshold: float = 2.1  # Combined Z-Score to start recording (now triggers at 2.1σ)
     release_threshold: float = 1.0  # Combined Z-Score to stop recording
     
     # Calibration - time to gather baseline data for Z-scores
     calibration_seconds: float = 60.0  # 60 seconds to build rolling average
     
     # Audio settings
-    audio_rms_baseline: float = 0.15  # Higher baseline = needs louder audio to trigger
-    audio_spike_multiplier: float = 3.5  # Higher multiplier = needs bigger spikes
+    audio_rms_baseline: float = 0.14  # Higher baseline = needs louder audio to trigger
+    audio_spike_multiplier: float = 3.3  # Higher multiplier = needs bigger spikes
     
     # Chat settings
     chat_window_seconds: float = 5.0  # Window for measuring chat velocity
@@ -61,8 +61,8 @@ class ScoringConfig:
     # Video settings
 
     # Video settings
-    video_motion_baseline: float = 17.0  # Higher baseline to ignore camera pans (was 12.0)
-    video_spike_multiplier: float = 5.0  # Higher multiplier to require more chaos (was 4.0)
+    video_motion_baseline: float = 14.0  # Higher baseline to ignore camera pans (was 12.0)
+    video_spike_multiplier: float = 4.5  # Higher multiplier to require more chaos (was 4.0)
 
 
 @dataclass

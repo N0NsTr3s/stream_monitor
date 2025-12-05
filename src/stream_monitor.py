@@ -282,6 +282,9 @@ class StreamMonitor:
                 messages = self._chat_monitor.get_all_messages() # type: ignore
                 
                 for msg in messages:
+                    # Display chat messages
+                    print(f"[{self.platform.value.upper()}] {msg.username}: {msg.message}")
+                    
                     # Add to analyzer
                     self._chat_analyzer.add_message( # type: ignore
                         msg.username,
@@ -491,7 +494,7 @@ def main():
     parser.add_argument(
         "--trigger-threshold",
         type=float,
-        default=4.5,
+        default=2.5,
         help="Z-Score threshold to trigger clip (standard deviations above mean)"
     )
     

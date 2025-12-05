@@ -67,9 +67,9 @@ class ScoringEngine:
         audio_weight: float = 0.5,
         chat_weight: float = 0.4,
         video_weight: float = 0.1,
-        trigger_threshold: float = 3.0,  # Z-Score threshold (3.0 = 3 sigma)
+        trigger_threshold: float = 2.5,  # Z-Score threshold (2.5 = 2.5 sigma)
         release_threshold: float = 1.0,  # Z-Score to stop recording
-        pre_roll_seconds: float = 3.0,
+        pre_roll_seconds: float = 5.0,
         post_roll_seconds: float = 5.0,
         min_clip_duration: float = 5.0,
         cooldown_seconds: float = 10.0,
@@ -92,6 +92,7 @@ class ScoringEngine:
         self._current_trigger: Optional[ClipTrigger] = None
         self._last_clip_end: float = 0.0
         self._finalizing_start_time: float = 0.0
+        self._release_time: float = 0.0  # When score first dropped below release threshold
         self._start_time = time.time()
         
         # Score history
@@ -229,6 +230,7 @@ class ScoringEngine:
                 
                 if projected_duration >= self.min_clip_duration:
                     self._state = RecordingState.COOLDOWN
+                    self._release_time = timestamp  # Track when score dropped
                     logger.debug("State: RECORDING -> COOLDOWN")
                 # Else: continue recording until min duration is met
         
@@ -288,30 +290,38 @@ class ScoringEngine:
     
     def _end_recording(self, timestamp: float):
         """End the current clip recording"""
-        if self._current_trigger:
-            self._current_trigger.end_time = timestamp
-            
-            duration = timestamp - self._current_trigger.start_time
-            
-            # Enforce minimum clip duration - extend end time if needed
-            if duration < self.min_clip_duration:
-                # Extend clip to meet minimum duration
-                self._current_trigger.end_time = self._current_trigger.start_time + self.min_clip_duration
-                duration = self.min_clip_duration
-                logger.info(f"Extended clip to minimum duration: {duration:.1f}s")
-            
-            logger.info(f"Clip ended. Duration: {duration:.1f}s, Peak: {self._current_trigger.peak_score:.2f}")
-            
-            # Emit clip
-            for callback in self._on_clip_end:
-                try:
-                    callback(self._current_trigger)
-                except Exception as e:
-                    logger.error(f"Clip end callback error: {e}")
-            
-            self._last_clip_end = timestamp
-            self._current_trigger = None
+        if not self._current_trigger:
+            return  # Already ended, prevent duplicate emissions
         
+        # Calculate correct end time: when score dropped + post-roll period
+        # This ensures we capture 5 seconds after the score falls below threshold
+        end_time = self._release_time + self.post_roll_seconds
+        self._current_trigger.end_time = end_time
+        
+        duration = end_time - self._current_trigger.start_time
+        
+        # Enforce minimum clip duration - extend end time if needed
+        if duration < self.min_clip_duration:
+            # Extend clip to meet minimum duration
+            self._current_trigger.end_time = self._current_trigger.start_time + self.min_clip_duration
+            duration = self.min_clip_duration
+            logger.info(f"Extended clip to minimum duration: {duration:.1f}s")
+        
+        logger.info(f"Clip ended. Duration: {duration:.1f}s, Peak: {self._current_trigger.peak_score:.2f}")
+        
+        # Save current trigger and clear it BEFORE emitting callbacks
+        # This prevents re-entry if callback takes time
+        trigger_to_emit = self._current_trigger
+        self._current_trigger = None
+        
+        # Emit clip
+        for callback in self._on_clip_end:
+            try:
+                callback(trigger_to_emit)
+            except Exception as e:
+                logger.error(f"Clip end callback error: {e}")
+        
+        self._last_clip_end = timestamp
         self._state = RecordingState.IDLE
         logger.debug("State: COOLDOWN -> IDLE")
     
