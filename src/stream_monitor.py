@@ -292,16 +292,22 @@ class StreamMonitor:
                         msg.emote_count
                     )
                 
-                # Analyze chat
+                # Analyze chat (update metrics/history)
                 metrics = self._chat_analyzer.analyze() # type: ignore
-                
-                # Get delayed score to align with video latency
-                chat_score = self._chat_analyzer.get_delayed_score( # type: ignore
-                    latency_seconds=self.config.scoring.chat_latency_seconds
-                )
-                
-                # Update scoring engine
-                self._scoring_engine.update(chat_score=chat_score) # type: ignore
+
+                # Get MPS from chat monitor (sample-and-hold). The YouTube API
+                # provides a batch-based MPS; we hold that value and feed it
+                # repeatedly into the scoring engine so RollingStats fills.
+                try:
+                    if hasattr(self._chat_monitor, 'get_messages_per_second'):
+                        mps = self._chat_monitor.get_messages_per_second() # type: ignore
+                    else:
+                        mps = self._chat_analyzer.get_messages_per_second() # type: ignore
+                except Exception:
+                    mps = self._chat_analyzer.get_messages_per_second() # type: ignore
+
+                # Update scoring engine with held MPS value (raw rate)
+                self._scoring_engine.update(chat_score=mps) # type: ignore
                 
                 time.sleep(0.5)  # Chat analysis rate
                 

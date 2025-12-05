@@ -56,6 +56,10 @@ class YouTubeOfficialChat:
         self.msg_count_window: int = 0
         self.last_tick: float = time.time()
         self.messages_buffer: List[YouTubeChatMessage] = []
+        # Sample & hold: current messages-per-second computed from last batch
+        self.current_mps: float = 0.0
+        # Last time we pushed/observed the held value (for external samplers)
+        self.last_update_push: float = time.time()
     
     def start(self) -> bool:
         """
@@ -158,15 +162,30 @@ class YouTubeOfficialChat:
                 
                 # Process messages (skip on initial fetch)
                 items = data.get("items", [])
+                # Calculate polling interval from API (milliseconds -> seconds)
+                wait_ms = data.get("pollingIntervalMillis", 5000)
+                polling_interval_sec = wait_ms / 1000.0
+
+                # Update token and next poll time
+                self.next_page_token = data.get("nextPageToken")
+                self.next_poll_time = time.time() + polling_interval_sec + 0.5
+
                 if not initial:
+                    # Buffer individual messages for emission
                     for item in items:
                         msg = self._parse_message(item)
                         if msg:
                             self.messages_buffer.append(msg)
                             self.msg_count_window += 1
 
-                    if items:
-                        logger.debug(f"Fetched {len(items)} chat messages")
+                    # SAMPLE & HOLD: compute messages-per-second based on the batch
+                    count = len(items)
+                    if polling_interval_sec > 0:
+                        self.current_mps = count / polling_interval_sec
+                    else:
+                        self.current_mps = 0.0
+
+                    logger.debug(f"Fetched {len(items)} chat messages; batch MPS={self.current_mps:.2f}")
             
             elif resp.status_code == 403:
                 logger.error("403 Forbidden - YouTube API quota exceeded or chat closed")
@@ -214,16 +233,10 @@ class YouTubeOfficialChat:
         Returns:
             Messages per second rate
         """
-        current_time = time.time()
-        elapsed = current_time - self.last_tick
-        
-        if elapsed >= 1.0:
-            mps = self.msg_count_window / elapsed
-            self.msg_count_window = 0
-            self.last_tick = current_time
-            return mps
-        
-        return 0.0
+        # Return the last computed batch MPS (sample-and-hold).
+        # This lets external code poll more frequently and receive a
+        # stable MPS value until the next YouTube batch updates it.
+        return float(self.current_mps)
     
     def stop(self):
         """Stop monitoring"""

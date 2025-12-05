@@ -125,5 +125,9 @@ class RollingStats:
     
     @property
     def is_warmed_up(self) -> bool:
-        """Check if we have enough samples for reliable stats (at least 30)"""
-        return len(self.window) >= 30
+        """Check if we have enough samples for reliable stats.
+
+        Uses the configured `min_samples` so callers can tune how quickly
+        the Z-score starts producing values.
+        """
+        return len(self.window) >= self.min_samples
