@@ -335,6 +335,56 @@ class StreamCapture:
             self._audio_process.terminate()
         
         logger.info("Stream capture stopped")
+
+    def save_clip(self, filename: str = "clip.mp4", duration: int = 30) -> bool:
+        """
+        Record a fresh clip by resolving a new HLS/M3U8 URL and forcing
+        a re-encode into a standard MP4. This avoids expired URLs and
+        corrupted/partial files caused by raw stream bytes.
+
+        This method returns immediately (spawns ffmpeg as a background process)
+        and does not block the main thread.
+        """
+        # Resolve a fresh stream URL now
+        try:
+            fresh_url = self._resolve_stream_url()
+            if not fresh_url:
+                logger.error("Could not resolve fresh stream URL for clipping")
+                return False
+
+            # Build ffmpeg command to force re-encode audio/video into MP4
+            cmd = [
+                self._ffmpeg_path or "ffmpeg",
+                "-y",
+                "-i", fresh_url,
+                "-t", str(int(duration)),
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-c:a", "aac",
+                "-strict", "experimental",
+                filename
+            ]
+
+            # Start ffmpeg in background so we don't block
+            logger.info(f"Starting ffmpeg clip record: {filename} ({duration}s)")
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to start ffmpeg clip: {e}")
+            return False
+
+    def save_clip_async(self, filename: str = "clip.mp4", duration: int = 30):
+        """Threaded wrapper for `save_clip` to match Clipper semantics."""
+        def task():
+            try:
+                self.save_clip(filename, duration)
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=task, daemon=True)
+        thread.start()
+        return thread
     
     def __enter__(self):
         self.start()

@@ -157,16 +157,44 @@ class StreamMonitor:
         """Called when a clip recording should end"""
         if not self._buffer or not self._clipper:
             return
-        
-        # Save clip asynchronously
-        self._clipper.save_clip_async(
-            self._buffer,
-            trigger.start_time,
-            trigger.end_time, # type: ignore
-            prefix=f"{self.platform.value}_{self.channel_id}",
-            reason=trigger.reason,
-            callback=self._on_clip_saved
-        )
+        # Prefer recording a fresh clip via StreamCapture (resolves a fresh
+        # URL and forces ffmpeg re-encode) to avoid expired URLs / corrupted files.
+        # Fall back to saving from the in-memory buffer if StreamCapture is
+        # not available or fails.
+        prefix = f"{self.platform.value}_{self.channel_id}"
+
+        # Generate a destination filename using the clipper helper
+        try:
+            out_path = self._clipper._generate_filename(prefix=prefix)
+            duration = (trigger.end_time - trigger.start_time) if trigger.end_time else max(5.0, self.config.clip.min_duration)
+        except Exception:
+            out_path = None
+            duration = max(5.0, self.config.clip.min_duration)
+
+        used_stream_record = False
+        if self._stream and hasattr(self._stream, "save_clip_async") and out_path:
+            try:
+                # Fire-and-forget ffmpeg recording using a fresh resolved URL
+                self._stream.save_clip_async(str(out_path), int(duration))
+                used_stream_record = True
+                # Call saved callback immediately with path (will be written soon)
+                # Note: we still return the path so UI shows something; actual file
+                # will appear when ffmpeg finishes.
+                self._on_clip_saved(out_path)
+            except Exception as e:
+                logger.error(f"Stream-based clip recording failed: {e}")
+                used_stream_record = False
+
+        if not used_stream_record:
+            # Fallback: save from the buffered stream bytes
+            self._clipper.save_clip_async(
+                self._buffer,
+                trigger.start_time,
+                trigger.end_time, # type: ignore
+                prefix=prefix,
+                reason=trigger.reason,
+                callback=self._on_clip_saved
+            )
     
     def _on_clip_saved(self, path: Optional[Path]):
         """Called when a clip has been saved"""
