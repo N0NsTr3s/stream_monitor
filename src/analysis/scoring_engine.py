@@ -98,9 +98,9 @@ class ScoringEngine:
         self._history: Deque[ScoreEvent] = deque(maxlen=600)  # ~60 seconds at 10Hz
         
         # Rolling stats for anomaly detection (5 minutes of history at ~1 update/sec)
-        self._audio_stats = RollingStats(window_size=300)
-        self._chat_stats = RollingStats(window_size=300)
-        self._video_stats = RollingStats(window_size=300)
+        self._audio_stats = RollingStats(window_size=300, min_samples=30)
+        self._chat_stats = RollingStats(window_size=300, min_samples=10)  # Chat updates slower
+        self._video_stats = RollingStats(window_size=300, min_samples=30)
         
         # Current scores
         self._audio_score = 0.0
@@ -116,11 +116,11 @@ class ScoringEngine:
     def is_calibrating(self) -> bool:
         """Check if currently in calibration phase (need enough samples for Z-scores)"""
         time_ok = (time.time() - self._start_time) >= self.calibration_seconds
-        # Also require minimum samples in rolling stats
+        # Also require minimum samples in rolling stats (matching each stat's min_samples)
         samples_ok = (
-            self._audio_stats.count >= 30 and
-            self._chat_stats.count >= 10 and  # Chat updates slower
-            self._video_stats.count >= 30
+            self._audio_stats.count >= self._audio_stats.min_samples and
+            self._chat_stats.count >= self._chat_stats.min_samples and
+            self._video_stats.count >= self._video_stats.min_samples
         )
         return not (time_ok and samples_ok)
 

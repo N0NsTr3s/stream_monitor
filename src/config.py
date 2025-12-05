@@ -49,7 +49,7 @@ class ScoringConfig:
     calibration_seconds: float = 60.0  # 60 seconds to build rolling average
     
     # Audio settings
-    audio_rms_baseline: float = 0.12  # Higher baseline = needs louder audio to trigger
+    audio_rms_baseline: float = 0.15  # Higher baseline = needs louder audio to trigger
     audio_spike_multiplier: float = 3.5  # Higher multiplier = needs bigger spikes
     
     # Chat settings

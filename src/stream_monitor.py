@@ -282,9 +282,6 @@ class StreamMonitor:
                 messages = self._chat_monitor.get_all_messages() # type: ignore
                 
                 for msg in messages:
-                    # DEBUG: Print chat messages
-                    print(f"\n[CHAT] {msg.username}: {msg.message}")
-                    
                     # Add to analyzer
                     self._chat_analyzer.add_message( # type: ignore
                         msg.username,

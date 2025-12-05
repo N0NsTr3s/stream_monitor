@@ -19,14 +19,16 @@ class RollingStats:
         4.0+ = Extremely rare spike
     """
     
-    def __init__(self, window_size: int = 300):
+    def __init__(self, window_size: int = 300, min_samples: int = 30):
         """
         Initialize rolling statistics tracker.
         
         Args:
             window_size: Number of samples to keep (e.g., 300 @ 1/sec = 5 mins)
+            min_samples: Minimum samples needed for Z-score calculation
         """
         self.window: deque = deque(maxlen=window_size)
+        self.min_samples = min_samples
 
     def update(self, value: float):
         """Add a new value to the history."""
@@ -65,8 +67,8 @@ class RollingStats:
         Returns:
             Z-score (standard deviations above mean). Returns 0 if not enough data.
         """
-        # Need at least 30 samples for reliable statistics
-        if len(self.window) < 30:
+        # Need minimum samples for reliable statistics
+        if len(self.window) < self.min_samples:
             return 0.0  # Not enough data yet (Calibrating)
         
         data = np.array(self.window)

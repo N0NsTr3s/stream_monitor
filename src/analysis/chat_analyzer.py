@@ -227,11 +227,15 @@ class ChatAnalyzer:
         # Remove old scores (keep 2x latency just in case)
         while self._score_buffer and self._score_buffer[0][0] < current_time - (latency_seconds * 2):
             self._score_buffer.popleft()
+        
+        # If buffer doesn't have enough history yet, use current score
+        if not self._score_buffer or self._score_buffer[0][0] > target_time:
+            return self._last_score
             
         # Find score closest to target time
         # Since buffer is sorted by time, we can iterate or bisect
         # For small buffers, iteration is fine
-        closest_score = 0.0
+        closest_score = self._last_score  # Default to current instead of 0
         min_diff = float('inf')
         
         for ts, score in self._score_buffer:

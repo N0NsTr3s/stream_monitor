@@ -40,7 +40,8 @@ class VideoAnalyzer:
         self,
         baseline_motion: float = 5.0,  # Pixel difference threshold
         spike_multiplier: float = 4.0,
-        history_seconds: float = 5.0
+        history_seconds: float = 5.0,
+        center_crop_ratio: float = 0.7  # Focus on center 70% of frame
     ):
         """
         Initialize video analyzer.
@@ -49,9 +50,11 @@ class VideoAnalyzer:
             baseline_motion: Expected baseline motion level
             spike_multiplier: How many times above baseline = max score
             history_seconds: Seconds of history to keep
+            center_crop_ratio: Ratio of frame to keep (0.7 = center 70%, crops 15% from each edge)
         """
         self.baseline_motion = baseline_motion
         self.spike_multiplier = spike_multiplier
+        self.center_crop_ratio = center_crop_ratio
         
         # History buffer
         max_samples = int(history_seconds * 30)  # Store 30 metrics per second
@@ -88,6 +91,14 @@ class VideoAnalyzer:
         # Convert to grayscale for motion detection
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            # Crop to center region to focus on main content
+            # This ignores margins (chat overlays, webcam corners, etc.)
+            if self.center_crop_ratio < 1.0:
+                h, w = gray.shape
+                margin_x = int(w * (1 - self.center_crop_ratio) / 2)
+                margin_y = int(h * (1 - self.center_crop_ratio) / 2)
+                gray = gray[margin_y:h-margin_y, margin_x:w-margin_x]
             
             # Calculate brightness
             brightness = float(np.mean(gray))

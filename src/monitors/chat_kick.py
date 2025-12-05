@@ -26,7 +26,7 @@ class CustomPusherConnection(Connection):
     def _connect(self):
         # 1. FORCE the URL to use the 'us2' cluster.
         # This overrides whatever wrong URL pysher was trying to use.
-        self.url = f"wss://ws-us2.pusher.com/app/{self.key}?protocol=7&client=python&version=1.0&flash=false"
+        self.url = f"wss://ws-us2.pusher.com/app/{self.key}?protocol=7&client=python&version=1.0&flash=false" # type: ignore
         
         # 2. Inject the Headers as before
         self.socket = websocket.WebSocketApp(
@@ -232,7 +232,7 @@ class KickChatMonitor(BaseChatMonitor):
                 
                 # Handle chat messages
                 if event == "App\\Events\\ChatMessageEvent":
-                    logger.info(f"Chat message received!")
+                    #logger.info(f"Chat message received!")
                     self._handle_chat_message(data)
                 
                 # Handle subscription success
