@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 from datetime import datetime
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -75,8 +76,31 @@ class Clipper:
         reason: str
     ) -> Optional[Path]:
         """Internal method to save a clip"""
-        
-        # Get raw bytes from buffer
+        # Wait for post-roll bytes to arrive in the buffer (if needed)
+        # If end_time is in the future relative to the buffer's last timestamp,
+        # poll the buffer until the requested end_time is available or a timeout
+        # occurs. This allows us to include pre-roll + post-roll reliably.
+        now = time.time()
+        # Estimate a reasonable timeout: at least 5s, or until end_time has passed + 5s
+        timeout = max(5.0, (end_time - now) + 5.0)
+        deadline = time.time() + timeout
+
+        while True:
+            _, last_ts = buffer.get_buffer_range()
+            if last_ts is None:
+                # Buffer empty yet; wait a bit
+                if time.time() > deadline:
+                    break
+                time.sleep(0.05)
+                continue
+
+            # If buffer already contains requested end_time (or it's in the past)
+            if last_ts >= end_time or time.time() > deadline:
+                break
+
+            time.sleep(0.05)
+
+        # Get raw bytes from buffer (may be shorter if deadline reached)
         data = buffer.get_stream_data(start_time, end_time)
         
         if not data:

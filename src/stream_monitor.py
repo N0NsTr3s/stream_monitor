@@ -172,29 +172,67 @@ class StreamMonitor:
             duration = max(5.0, self.config.clip.min_duration)
 
         used_stream_record = False
-        if self._stream and hasattr(self._stream, "save_clip_async") and out_path:
+
+        # Determine requested start/end including configured pre-roll
+        try:
+            pre_roll = float(self.config.clip.pre_roll_seconds)
+        except Exception:
+            pre_roll = 0.0
+
+        if trigger.start_time is None:
+            # If start_time missing, fall back to stream-based recording
+            chosen_path = None
+        else:
+            requested_start = trigger.start_time - pre_roll
+            requested_end = trigger.end_time if trigger.end_time else (trigger.start_time + max(5.0, duration))
+
+            # Check buffer availability: prefer buffered save if buffer contains requested pre-roll
+            try:
+                buf_start, buf_end = self._buffer.get_buffer_range() # type: ignore
+            except Exception:
+                buf_start, buf_end = None, None
+
+            if buf_start is not None and buf_start <= requested_start:
+                # Buffer contains required pre-roll — use Clipper (it will wait for post-roll)
+                try:
+                    self._clipper.save_clip_async(
+                        self._buffer,
+                        requested_start,
+                        requested_end, # type: ignore
+                        prefix=prefix,
+                        reason=trigger.reason,
+                        callback=self._on_clip_saved
+                    )
+                    used_stream_record = True
+                except Exception as e:
+                    logger.error(f"Buffered clip save failed: {e}")
+                    used_stream_record = False
+
+        # If buffer wasn't used, try stream-based recording as a fallback.
+        if not used_stream_record and self._stream and hasattr(self._stream, "save_clip_async") and out_path:
             try:
                 # Fire-and-forget ffmpeg recording using a fresh resolved URL
+                # Do not call _on_clip_saved here — wait for callback from the recording method
+                # (StreamCapture.save_clip_async should signal completion if available).
                 self._stream.save_clip_async(str(out_path), int(duration))
                 used_stream_record = True
-                # Call saved callback immediately with path (will be written soon)
-                # Note: we still return the path so UI shows something; actual file
-                # will appear when ffmpeg finishes.
-                self._on_clip_saved(out_path)
             except Exception as e:
                 logger.error(f"Stream-based clip recording failed: {e}")
                 used_stream_record = False
 
         if not used_stream_record:
-            # Fallback: save from the buffered stream bytes
-            self._clipper.save_clip_async(
-                self._buffer,
-                trigger.start_time,
-                trigger.end_time, # type: ignore
-                prefix=prefix,
-                reason=trigger.reason,
-                callback=self._on_clip_saved
-            )
+            # Last resort: attempt to save from buffer using available timestamps
+            try:
+                self._clipper.save_clip_async(
+                    self._buffer,
+                    trigger.start_time,
+                    trigger.end_time, # type: ignore
+                    prefix=prefix,
+                    reason=trigger.reason,
+                    callback=self._on_clip_saved
+                )
+            except Exception as e:
+                logger.error(f"Fallback buffered save failed: {e}")
     
     def _on_clip_saved(self, path: Optional[Path]):
         """Called when a clip has been saved"""
