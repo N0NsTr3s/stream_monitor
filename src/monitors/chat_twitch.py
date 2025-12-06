@@ -765,8 +765,8 @@ if __name__ == "__main__":
         start = time.time()
         while time.time() - start < 10:
             msgs = monitor.get_all_messages()
-            for m in msgs:
-                print(f"[{m.username}]: {m.message}")
+            #for m in msgs:
+                #print(f"[{m.username}]: {m.message}")
             await asyncio.sleep(0.1)
             
         monitor.stop()

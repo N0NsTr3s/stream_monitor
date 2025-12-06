@@ -21,12 +21,12 @@ class StreamConfig:
 @dataclass
 class ClipConfig:
     """Configuration for clip generation"""
-    pre_roll_seconds: float = 5.0  # seconds before trigger to include
-    post_roll_seconds: float = 5.0  # seconds after score drops to include (Increased from 3.0)
-    min_duration: float = 10.0  # Minimum clip duration in seconds (Increased from 8.0)
+    pre_roll_seconds: float = 25.0  # seconds before trigger to include
+    post_roll_seconds: float = 15.0  # seconds after score drops to include (Increased from 3.0)
+    min_duration: float = 15.0  # Minimum clip duration in seconds (Increased from 8.0)
     output_dir: Path = field(default_factory=lambda: Path("clips"))
     format: str = "mp4"
-    fps: float = 60.0  # Target FPS for clips
+    fps: float = 30.0  # Target FPS for clips
     
 
 @dataclass
@@ -42,15 +42,15 @@ class ScoringConfig:
     # 2.0 = Sensitive (Clips often)
     # 3.0 = Standard (Good moments)
     # 4.0 = Strict (Only massive spikes)
-    trigger_threshold: float = 2.5  # Combined Z-Score to start recording (now triggers at 2.5σ)
-    release_threshold: float = 1.0  # Combined Z-Score to stop recording
+    trigger_threshold: float = 3.0  # Combined Z-Score to start recording (now triggers at 2.5σ)
+    release_threshold: float = 0.5  # Combined Z-Score to stop recording
     
     # Calibration - time to gather baseline data for Z-scores
     calibration_seconds: float = 60.0  # 60 seconds to build rolling average
     
     # Audio settings
-    audio_rms_baseline: float = 0.145  # Higher baseline = needs louder audio to trigger
-    audio_spike_multiplier: float = 3.5  # Higher multiplier = needs bigger spikes
+    audio_rms_baseline: float = 0.15  # Higher baseline = needs louder audio to trigger
+    audio_spike_multiplier: float = 3.6  # Higher multiplier = needs bigger spikes
     
     # Chat settings
     chat_window_seconds: float = 5.0  # Window for measuring chat velocity
@@ -62,7 +62,7 @@ class ScoringConfig:
 
     # Video settings
     video_motion_baseline: float = 14.0  # Higher baseline to ignore camera pans (was 12.0)
-    video_spike_multiplier: float = 4.5  # Higher multiplier to require more chaos (was 4.0)
+    video_spike_multiplier: float = 4.7  # Higher multiplier to require more chaos (was 4.0)
 
 
 @dataclass

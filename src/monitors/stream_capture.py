@@ -359,7 +359,7 @@ class StreamCapture:
                 "-i", fresh_url,
                 "-t", str(int(duration)),
                 "-c:v", "libx264",
-                "-preset", "ultrafast",
+                "-preset", "superfast",
                 "-c:a", "aac",
                 "-strict", "experimental",
                 filename

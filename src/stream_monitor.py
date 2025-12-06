@@ -348,8 +348,9 @@ class StreamMonitor:
                 messages = self._chat_monitor.get_all_messages() # type: ignore
                 
                 for msg in messages:
-                    # Display chat messages
-                    print(f"[{self.platform.value.upper()}] {msg.username}: {msg.message}")
+                    # Display chat messages at DEBUG level so they only appear
+                    # when the user enables verbose/debug logging.
+                    logger.debug(f"[{self.platform.value.upper()}] {msg.username}: {msg.message}")
                     
                     # Add to analyzer
                     self._chat_analyzer.add_message( # type: ignore
