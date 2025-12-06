@@ -92,7 +92,7 @@ class ScoringEngine:
         self._current_trigger: Optional[ClipTrigger] = None
         self._last_clip_end: float = 0.0
         self._finalizing_start_time: float = 0.0
-        self._release_time: float = 0.0  # When score first dropped below release threshold
+        self._release_time: Optional[float] = None  # When score first dropped below release threshold
         self._start_time = time.time()
         
         # Score history
@@ -188,7 +188,13 @@ class ScoringEngine:
             state=self._state
         )
         self._history.append(event)
-        
+
+        # Debug: log z-scores and combined score at DEBUG level
+        logger.debug(
+            "Scores @%.3f — audio_z=%.2f, chat_z=%.2f, video_z=%.2f, combined=%.2f, state=%s",
+            timestamp, audio_z, chat_z, video_z, self._combined_score, self._state.value,
+        )
+
         # Process state machine
         self._process_state(timestamp)
         
@@ -206,6 +212,7 @@ class ScoringEngine:
             if self._combined_score >= self.trigger_threshold:
                 # Check cooldown
                 if timestamp - self._last_clip_end >= self.cooldown_seconds:
+                    logger.info("State: IDLE -> TRIGGERED (score=%.2f >= threshold=%.2f)", self._combined_score, self.trigger_threshold)
                     self._start_recording(timestamp)
         
         elif self._state == RecordingState.TRIGGERED:
@@ -229,9 +236,10 @@ class ScoringEngine:
                 projected_duration = current_duration + self.post_roll_seconds
                 
                 if projected_duration >= self.min_clip_duration:
-                    self._state = RecordingState.COOLDOWN
+                    # Mark release time and transition to COOLDOWN only when appropriate
                     self._release_time = timestamp  # Track when score dropped
-                    logger.debug("State: RECORDING -> COOLDOWN")
+                    self._state = RecordingState.COOLDOWN
+                    logger.debug("State: RECORDING -> COOLDOWN (release_time=%.3f)", self._release_time)
                 # Else: continue recording until min duration is met
         
         elif self._state == RecordingState.COOLDOWN:
@@ -249,7 +257,7 @@ class ScoringEngine:
                     # This allows us to merge with a subsequent clip if it starts soon
                     self._state = RecordingState.FINALIZING
                     self._finalizing_start_time = timestamp
-                    logger.debug("State: COOLDOWN -> FINALIZING")
+                    logger.debug("State: COOLDOWN -> FINALIZING (time_below=%.3f >= post_roll=%.3f)", time_below_threshold, self.post_roll_seconds)
                 
                 # Re-trigger if score goes back up
                 elif self._combined_score >= self.trigger_threshold:
@@ -270,10 +278,12 @@ class ScoringEngine:
     
     def _start_recording(self, timestamp: float):
         """Start a new clip recording"""
+        # Mark triggered state and create a trigger. Use the actual timestamp as
+        # the start_time — pre-roll will be applied when saving from the buffer.
         self._state = RecordingState.TRIGGERED
-        
+
         self._current_trigger = ClipTrigger(
-            start_time=timestamp - self.pre_roll_seconds,
+            start_time=timestamp,
             trigger_time=timestamp,
             peak_score=self._combined_score,
             reason=self._determine_reason()
@@ -295,7 +305,9 @@ class ScoringEngine:
         
         # Calculate correct end time: when score dropped + post-roll period
         # This ensures we capture 5 seconds after the score falls below threshold
-        end_time = self._release_time + self.post_roll_seconds
+        # If release_time is not set (defensive), fall back to current timestamp
+        release = self._release_time if self._release_time is not None else timestamp
+        end_time = release + self.post_roll_seconds
         self._current_trigger.end_time = end_time
         
         duration = end_time - self._current_trigger.start_time
@@ -321,7 +333,12 @@ class ScoringEngine:
             except Exception as e:
                 logger.error(f"Clip end callback error: {e}")
         
-        self._last_clip_end = timestamp
+        # Record the real clip end time (used for cooldown checks)
+        try:
+            final_end = trigger_to_emit.end_time or timestamp
+        except Exception:
+            final_end = timestamp
+        self._last_clip_end = final_end
         self._state = RecordingState.IDLE
         logger.debug("State: COOLDOWN -> IDLE")
     

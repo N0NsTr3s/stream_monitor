@@ -83,19 +83,21 @@ class Clipper:
         now = time.time()
         # Estimate a reasonable timeout: at least 5s, or until end_time has passed + 5s
         timeout = max(5.0, (end_time - now) + 5.0)
-        deadline = time.time() + timeout
+        deadline = now + timeout
 
         while True:
+            current_time = time.time()
+            if current_time > deadline:
+                break
+            
             _, last_ts = buffer.get_buffer_range()
             if last_ts is None:
                 # Buffer empty yet; wait a bit
-                if time.time() > deadline:
-                    break
                 time.sleep(0.05)
                 continue
 
             # If buffer already contains requested end_time (or it's in the past)
-            if last_ts >= end_time or time.time() > deadline:
+            if last_ts >= end_time:
                 break
 
             time.sleep(0.05)

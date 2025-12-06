@@ -52,7 +52,7 @@ class AudioAnalyzer:
         
         # History buffer
         max_samples = int(history_seconds * 10)  # Store 10 metrics per second
-        self._history: Deque[AudioMetrics] = deque(maxlen=max_samples)
+        self._history: Deque[AudioMetrics] = deque(maxlen=int(max_samples))
         
         # Adaptive baseline
         # Store ~60 seconds of history for robust baseline (10 samples/sec * 60)
