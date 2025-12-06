@@ -236,45 +236,12 @@ class ScoringEngine:
                 projected_duration = current_duration + self.post_roll_seconds
                 
                 if projected_duration >= self.min_clip_duration:
-                    # Mark release time and transition to COOLDOWN only when appropriate
-                    self._release_time = timestamp  # Track when score dropped
-                    self._state = RecordingState.COOLDOWN
-                    logger.debug("State: RECORDING -> COOLDOWN (release_time=%.3f)", self._release_time)
+                    # End recording immediately - no cooldown/finalizing states
+                    self._end_recording(timestamp)
                 # Else: continue recording until min duration is met
         
-        elif self._state == RecordingState.COOLDOWN:
-            # Check if post-roll period is complete
-            if self._current_trigger:
-                cooldown_start = self._current_trigger.trigger_time + (
-                    timestamp - self._current_trigger.trigger_time
-                )
-                
-                # Check if enough time has passed since score dropped
-                time_below_threshold = self._get_time_below_threshold()
-                
-                if time_below_threshold >= self.post_roll_seconds:
-                    # Instead of ending immediately, enter FINALIZING state
-                    # This allows us to merge with a subsequent clip if it starts soon
-                    self._state = RecordingState.FINALIZING
-                    self._finalizing_start_time = timestamp
-                    logger.debug("State: COOLDOWN -> FINALIZING (time_below=%.3f >= post_roll=%.3f)", time_below_threshold, self.post_roll_seconds)
-                
-                # Re-trigger if score goes back up
-                elif self._combined_score >= self.trigger_threshold:
-                    self._state = RecordingState.RECORDING
-                    logger.debug("State: COOLDOWN -> RECORDING (re-triggered)")
-                    
-        elif self._state == RecordingState.FINALIZING:
-            # If score spikes again during the merge window (pre-roll duration),
-            # go back to recording and extend the current clip
-            if self._combined_score >= self.trigger_threshold:
-                self._state = RecordingState.RECORDING
-                logger.info("Merging with subsequent clip event!")
-                logger.debug("State: FINALIZING -> RECORDING (merged)")
-            
-            # If merge window passed, finalize the clip
-            elif timestamp - self._finalizing_start_time >= self.pre_roll_seconds:
-                self._end_recording(timestamp)
+        # Removed COOLDOWN and FINALIZING states to simplify logic
+        # and ensure clips are saved immediately when the event ends.
     
     def _start_recording(self, timestamp: float):
         """Start a new clip recording"""
@@ -340,7 +307,7 @@ class ScoringEngine:
             final_end = timestamp
         self._last_clip_end = final_end
         self._state = RecordingState.IDLE
-        logger.debug("State: COOLDOWN -> IDLE")
+        logger.info("State: RECORDING -> IDLE (Clip finished)")
     
     def _get_time_below_threshold(self) -> float:
         """Get how long the score has been below release threshold"""
@@ -378,9 +345,7 @@ class ScoringEngine:
         """Check if currently recording"""
         return self._state in (
             RecordingState.TRIGGERED,
-            RecordingState.RECORDING,
-            RecordingState.COOLDOWN,
-            RecordingState.FINALIZING
+            RecordingState.RECORDING
         )
     
     @property

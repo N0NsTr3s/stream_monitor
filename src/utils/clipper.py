@@ -44,7 +44,8 @@ class Clipper:
         """Generate a unique filename for a clip"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._clip_count += 1
-        filename = f"{prefix}_{timestamp}_{self._clip_count:04d}.{self.output_format}"
+        # Always use .mp4 for the final output filename
+        filename = f"{prefix}_{timestamp}_{self._clip_count:04d}.mp4"
         return self.output_dir / filename
     
     def save_clip(
