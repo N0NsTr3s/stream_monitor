@@ -553,81 +553,6 @@ def main():
     )
     
     parser.add_argument(
-        "-q", "--quality",
-        default="best",
-        help="Stream quality (best, worst, 720p, etc.)"
-    )
-    
-    parser.add_argument(
-        "-o", "--output",
-        default="clips",
-        help="Output directory for clips"
-    )
-    
-    parser.add_argument(
-        "--trigger-threshold",
-        type=float,
-        default=2.5,
-        help="Z-Score threshold to trigger clip (standard deviations above mean)"
-    )
-    
-    parser.add_argument(
-        "--release-threshold",
-        type=float,
-        default=1.5,
-        help="Z-Score threshold to end clip (standard deviations above mean)"
-    )
-    
-    parser.add_argument(
-        "--pre-roll",
-        type=float,
-        default=5.0,
-        help="Seconds before trigger to include"
-    )
-    
-    parser.add_argument(
-        "--post-roll",
-        type=float,
-        default=3.0,
-        help="Seconds after release to include"
-    )
-    
-    parser.add_argument(
-        "--audio-weight",
-        type=float,
-        default=0.4,
-        help="Weight for audio signal (0.0-1.0)"
-    )
-    
-    parser.add_argument(
-        "--chat-weight",
-        type=float,
-        default=0.4,
-        help="Weight for chat signal (0.0-1.0)"
-    )
-    
-    parser.add_argument(
-        "--video-weight",
-        type=float,
-        default=0.2,
-        help="Weight for video signal (0.0-1.0)"
-    )
-    
-    parser.add_argument(
-        "--video-baseline",
-        type=float,
-        default=12.0,
-        help="Baseline motion threshold"
-    )
-    
-    parser.add_argument(
-        "--video-multiplier",
-        type=float,
-        default=6.0,
-        help="Video spike multiplier"
-    )
-    
-    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose logging"
@@ -643,19 +568,7 @@ def main():
         datefmt="%H:%M:%S"
     )
     
-    # Update config from args
-    config.stream.quality = args.quality
-    config.clip.output_dir = Path(args.output)
-    config.scoring.trigger_threshold = args.trigger_threshold
-    config.scoring.release_threshold = args.release_threshold
-    config.clip.pre_roll_seconds = args.pre_roll
-    config.clip.post_roll_seconds = args.post_roll
-    config.scoring.audio_weight = args.audio_weight
-    config.scoring.chat_weight = args.chat_weight
-    config.scoring.video_weight = args.video_weight
-    config.scoring.video_motion_baseline = args.video_baseline
-    config.scoring.video_spike_multiplier = args.video_multiplier
-    
+
     # Validate URL
     if not PlatformDetector.is_supported(args.url):
         print(f"Error: Unsupported platform for URL: {args.url}")
